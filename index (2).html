@@ -1,0 +1,1946 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Soma Deutsch 🐝 — Learn German!</title>
+<meta name="theme-color" content="#FFCE00">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Soma Deutsch">
+<link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🐝</text></svg>'>
+<script src="https://cdn.tailwindcss.com"></script>
+<script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<style>html,body{margin:0;padding:0;background:#FFFBF3}</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+var DB_URL = "https://soma-deutsch-default-rtdb.firebaseio.com"; // e.g. https://soma-deutsch-default-rtdb.firebaseio.com
+var REMOTE = DB_URL.indexOf("https://") === 0;
+var encK = function(k){ return String(k).replace(/[.#$/\[\]]/g, "_"); };
+window.storage = {
+  async get(key, shared){
+    if (shared && REMOTE) {
+      const r = await fetch(DB_URL + "/soma/" + encK(key) + ".json");
+      if (!r.ok) throw new Error("fetch failed");
+      const v = await r.json();
+      if (v == null) throw new Error("not found");
+      return { key, value: typeof v === "string" ? v : JSON.stringify(v), shared: true };
+    }
+    const v = localStorage.getItem("soma:" + key);
+    if (v == null) throw new Error("not found");
+    return { key, value: v, shared: !!shared };
+  },
+  async set(key, value, shared){
+    if (shared && REMOTE) {
+      await fetch(DB_URL + "/soma/" + encK(key) + ".json", { method: "PUT", headers: {"Content-Type":"application/json"}, body: JSON.stringify(value) });
+      return { key, value, shared: true };
+    }
+    localStorage.setItem("soma:" + key, value);
+    return { key, value, shared: !!shared };
+  },
+  async delete(key, shared){
+    if (shared && REMOTE) {
+      await fetch(DB_URL + "/soma/" + encK(key) + ".json", { method: "DELETE" });
+      return { key, deleted: true, shared: true };
+    }
+    localStorage.removeItem("soma:" + key);
+    return { key, deleted: true, shared: !!shared };
+  },
+  async list(prefix, shared){
+    if (shared && REMOTE) {
+      const r = await fetch(DB_URL + "/soma.json?shallow=true");
+      if (!r.ok) throw new Error("fetch failed");
+      const obj = (await r.json()) || {};
+      const keys = Object.keys(obj).filter(k => k.indexOf(prefix || "") === 0);
+      return { keys, prefix, shared: true };
+    }
+    const keys = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.indexOf("soma:" + (prefix || "")) === 0) keys.push(k.slice(5));
+    }
+    return { keys, prefix, shared: !!shared };
+  },
+};
+</script>
+<script>
+"use strict";
+const { useState, useEffect, useMemo, useRef } = React;
+/* ================= SOMA DEUTSCH 🐝 =================
+   Learn German, gamified.
+   Flow: Splash → Menu (Game/Leaderboard/Account)
+   → A1 Course (Introduction + Lektion 1–5) → Lessons.
+==================================================== */
+const C = { red: "#CE1126", green: "#006B3F", gold: "#FFCE00", ink: "#1F1A14", bg: "#FFFBF3", card: "#FFFFFF", line: "#EDE6D8" };
+/* ---------- Sounds (WebAudio, no files needed) ---------- */
+let AC = null;
+const ac = () => {
+    try {
+        if (!AC)
+            AC = new (window.AudioContext || window.webkitAudioContext)();
+        // Browsers start audio "suspended" until a user gesture — wake it up
+        if (AC.state === "suspended")
+            AC.resume();
+        return AC;
+    }
+    catch (e) {
+        return null;
+    }
+};
+let UNLOCKED = false;
+const unlock = (ctx) => {
+    if (UNLOCKED || !ctx)
+        return;
+    try {
+        // iOS unlock trick: play one silent sample inside a user gesture
+        const b = ctx.createBuffer(1, 1, 22050);
+        const s = ctx.createBufferSource();
+        s.buffer = b;
+        s.connect(ctx.destination);
+        s.start(0);
+        UNLOCKED = true;
+    }
+    catch (e) { }
+};
+const tone = (f, t0, dur, type, vol) => {
+    const ctx = ac();
+    if (!ctx)
+        return;
+    unlock(ctx);
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = type;
+    o.frequency.value = f;
+    g.gain.setValueAtTime(vol, ctx.currentTime + t0);
+    g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + t0 + dur);
+    o.connect(g);
+    g.connect(ctx.destination);
+    o.start(ctx.currentTime + t0);
+    o.stop(ctx.currentTime + t0 + dur + 0.05);
+};
+const SFX = {
+    click: () => tone(520, 0, 0.08, "sine", 0.12),
+    correct: () => { tone(660, 0, 0.12, "sine", 0.18); tone(880, 0.1, 0.2, "sine", 0.18); },
+    wrong: () => { tone(200, 0, 0.25, "sawtooth", 0.12); tone(150, 0.12, 0.3, "sawtooth", 0.1); },
+    match: () => tone(760, 0, 0.1, "triangle", 0.15),
+    win: () => { [523, 659, 784, 1047].forEach((f, i) => tone(f, i * 0.13, 0.25, "sine", 0.16)); },
+    lose: () => { [400, 320, 240].forEach((f, i) => tone(f, i * 0.18, 0.3, "sine", 0.12)); },
+    tick: () => tone(1200, 0, 0.05, "square", 0.06),
+    combo: () => { tone(880, 0, 0.09, "triangle", 0.16); tone(1175, 0.09, 0.16, "triangle", 0.16); },
+    star3: () => { [523, 659, 784, 1047, 1319].forEach((f, i) => tone(f, i * 0.11, 0.22, "sine", 0.15)); tone(1568, 0.55, 0.45, "triangle", 0.12); },
+};
+/* ---------- Password hashing (game-grade) ---------- */
+const sha = async (t) => {
+    try {
+        const b = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("soma🐝" + t));
+        return [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, "0")).join("");
+    }
+    catch (e) {
+        let h = 5381;
+        for (const c of t)
+            h = ((h * 33) ^ c.charCodeAt(0)) >>> 0;
+        return "f" + h;
+    }
+};
+/* ---------- Number & year engines ---------- */
+const ONES = ["null", "eins", "zwei", "drei", "vier", "fünf", "sechs", "sieben", "acht", "neun", "zehn", "elf", "zwölf", "dreizehn", "vierzehn", "fünfzehn", "sechzehn", "siebzehn", "achtzehn", "neunzehn"];
+const TENS = { 20: "zwanzig", 30: "dreißig", 40: "vierzig", 50: "fünfzig", 60: "sechzig", 70: "siebzig", 80: "achtzig", 90: "neunzig" };
+const two = (n) => { if (n < 20)
+    return ONES[n]; const t = Math.floor(n / 10) * 10, u = n % 10; return u === 0 ? TENS[t] : (u === 1 ? "ein" : ONES[u]) + "und" + TENS[t]; };
+const numDe = (n) => { if (n < 100)
+    return two(n); if (n < 1000) {
+    const h = Math.floor(n / 100), r = n % 100;
+    return (h === 1 ? "hundert" : ONES[h] + "hundert") + (r ? two(r) : "");
+} return "tausend"; };
+const yearDe = (y) => { if (y < 2000) {
+    const h = Math.floor(y / 100), r = y % 100;
+    return ONES[h] + "hundert" + (r ? two(r) : "");
+} const r = y % 1000; return "zweitausend" + (r ? two(r) : ""); };
+const numWhy = (n) => {
+    if (n < 20)
+        return "One of the base numbers — just memorise this one!";
+    if (n < 100) {
+        const t = Math.floor(n / 10) * 10, u = n % 10;
+        if (u === 0)
+            return TENS[t] + " is a round ten.";
+        return n + " = " + (u === 1 ? "ein" : ONES[u]) + " + und + " + TENS[t] + " — in German the UNITS come first (" + u + "-and-" + t + ").";
+    }
+    const h = Math.floor(n / 100), r = n % 100;
+    return n + " = " + (h === 1 ? "hundert" : ONES[h] + "hundert") + " (" + h + "00)" + (r ? " + " + two(r) + " (" + r + ", units first)" : "");
+};
+const yearWhy = (y) => y < 2000
+    ? y + " is read as " + ONES[Math.floor(y / 100)] + "hundert (" + Math.floor(y / 100) + "-hundred) + " + two(y % 100) + " (" + (y % 100) + ")."
+    : y + " = zweitausend (2000)" + (y % 1000 ? " + " + two(y % 1000) + " (" + (y % 1000) + ")" : "");
+const artWhy = (de) => de.startsWith("der ") ? " · der = masculine noun" : de.startsWith("die ") ? " · die = feminine/plural noun" : de.startsWith("das ") ? " · das = neuter noun" : "";
+/* ---------- Membership: 7-day free trial, then KES 399/month via M-Pesa ---------- */
+const MPESA_NUMBER = "0707 679 987";
+const MPESA_NAME = "Carol Matheka";
+const PRICE_M = "KES 399";
+const PRICE_Y = "KES 3,999";
+const monthKey = (d) => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0");
+const mkPlus = (mk, n) => { const [y, m] = mk.split("-").map(Number); return monthKey(new Date(y, m - 1 + n, 1)); };
+const fmtMk = (mk) => { const [y, m] = String(mk || "").split("-").map(Number); return new Date(y, m - 1, 1).toLocaleString("en", { month: "long", year: "numeric" }); };
+/* Personal unlock codes: derived from username + month. No code list exists anywhere —
+   only the owner (via the PIN-locked panel) can generate them. */
+const CODE_WORDS = ["BIENE", "HONIG", "BLUME", "SONNE", "STERN", "APFEL", "MANGO", "TIGER", "SAFARI", "DIANI", "PILOT", "ZEBRA"];
+const personalCode = async (name, mk) => {
+    const h = await sha("code:" + String(name || "").trim().toLowerCase() + "|" + mk);
+    const w = CODE_WORDS[parseInt(h.slice(0, 2), 16) % CODE_WORDS.length];
+    return w + "-" + (1000 + (parseInt(h.slice(2, 8), 16) % 9000));
+};
+const OWNER_HASH = "77e0fb8721b368d1a8ec0f18a8f482b6211a5cf31b619c117232b469efbca206";
+/* ---------- Course data ---------- */
+const UNITS = [
+    { id: "alphabet", icon: "🔤", color: C.red, title: "Das Alphabet", sub: "Letters & spelling", noType: true,
+        words: [["J", "pronounced 'yot'"], ["W", "pronounced 've'"], ["V", "pronounced 'fau'"], ["Z", "pronounced 'tset'"], ["C", "pronounced 'tse'"], ["Y", "pronounced 'ypsilon'"], ["ß", "double s ('estset')"], ["Q", "pronounced 'ku'"], ["X", "pronounced 'iks'"], ["Wie heißen Sie?", "What are you called?"], ["Ich heiße Carol", "My name is Carol"], ["Buchstabieren Sie bitte", "Spell please"], ["Ich verstehe nicht", "I don't understand"], ["Danke schön", "Thanks"], ["Bitte schön", "You're welcome"]] },
+    { id: "pronun", icon: "🗣️", color: C.green, title: "Aussprache", sub: "Pronunciation words",
+        words: [["heute", "today"], ["Leute", "people"], ["neu", "new"], ["Zeitung", "newspaper"], ["seit", "since"], ["Polizei", "police"], ["Mädchen", "girl"], ["schön", "nice / beautiful"], ["müde", "tired"], ["Häuser", "houses"], ["Fräulein", "Miss, young woman"], ["Läufer", "runner"], ["Verkäufer", "salesman"], ["sagen", "to say"], ["sehen", "to see"], ["singen", "to sing"], ["Sohn", "son"], ["Sonne", "sun"], ["suchen", "to look for"], ["besuchen", "to visit"], ["Schwester", "sister"], ["Schule", "school"], ["schicken", "to send"], ["Buch", "book"], ["noch", "still"], ["Sprachen", "languages"], ["vergessen", "to forget"], ["verstehen", "to understand"], ["Vater", "father"], ["voll", "full"], ["Zug", "train"], ["Zoll", "customs"], ["fertig", "finished"], ["die Miete", "rent"], ["mieten", "to rent"], ["verdienen", "to earn"], ["mein", "my"], ["dein", "your"], ["sein", "his"], ["wieviel", "how much"], ["wie viele", "how many"], ["schenken", "to gift / offer"], ["der Schüler", "learner / pupil"], ["die Schülerin", "female learner"], ["Sprechen Sie Deutsch?", "Do you speak German?"], ["Ich spreche ein bisschen Deutsch", "I speak a little German"], ["zum Beispiel", "for example"]] },
+    { id: "greet", icon: "👋", color: C.gold, title: "Die Begrüßung", sub: "Greetings",
+        words: [["Guten Morgen", "Good morning"], ["Guten Tag", "Good afternoon"], ["Guten Abend", "Good evening"], ["Wie geht es Ihnen?", "How are you? (formal)"], ["Wie geht es dir?", "How are you? (informal)"], ["Wie geht's?", "How's it going?"], ["Danke, gut", "Thanks, I'm fine"], ["Danke, prima", "Thanks, great"], ["Danke, es geht", "Thanks, life is moving on"], ["Danke, naja es geht", "Thanks, it's 50/50"], ["Mir geht es gut", "I'm fine"], ["schlecht", "bad"], ["Und Ihnen?", "And you? (formal)"], ["Und dir?", "And you? (informal)"], ["Danke, auch gut", "Thanks, fine too"], ["Wie geht es euch?", "How are you all?"], ["Es geht uns gut", "We are fine"], ["Tschüs", "Bye"], ["Bis morgen", "See you tomorrow"], ["Bis Montag", "See you Monday"]] },
+    { id: "intro", icon: "🌍", color: C.ink, title: "Die Vorstellung", sub: "Countries & people",
+        words: [["Deutschland", "Germany"], ["Deutsch", "German language"], ["Deutscher", "German man"], ["Kenia", "Kenya"], ["Kenianer", "Kenyan man"], ["Kenianerin", "Kenyan woman"], ["Italien", "Italy"], ["Italienisch", "Italian language"], ["Italienerin", "Italian woman"], ["Frankreich", "France"], ["Franzose", "French man"], ["Französin", "French woman"], ["Französisch", "French language"], ["Großbritannien", "Great Britain"], ["England", "England"], ["Engländer", "English man"], ["Engländerin", "English woman"], ["Österreich", "Austria"], ["Österreicherin", "Austrian woman"], ["die Schweiz", "Switzerland"], ["Schweizer", "Swiss man"], ["Schweizerin", "Swiss woman"], ["Deutsche", "German woman"], ["Italiener", "Italian man"], ["Brite", "British person"], ["Englisch", "English language"]] },
+    { id: "origin", icon: "🏠", color: C.red, title: "Herkunft & Wohnhaft", sub: "Where are you from?",
+        words: [["Woher kommen Sie?", "Where do you come from? (formal)"], ["Woher kommst du?", "Where do you come from? (informal)"], ["Ich komme aus Kenia", "I come from Kenya"], ["Ich komme aus Diani", "I come from Diani"], ["Wo wohnen Sie?", "Where do you live? (formal)"], ["Wo wohnst du?", "Where do you live? (informal)"], ["Ich wohne in Diani", "I live in Diani"], ["Wo lebst du?", "Where do you live? ('leben')"], ["Ich lebe in Diani", "I live in Diani ('leben')"], ["woher", "where from"], ["wohin", "where to"], ["warum", "why"], ["wer", "who"], ["wann", "when"], ["was", "what"], ["wie", "how"], ["aus", "from"]] },
+    { id: "pron", icon: "🫵", color: C.green, title: "Pronomen & Sein", sub: "I am, you are…",
+        words: [["ich", "I"], ["du", "you (informal)"], ["Sie", "you (formal)"], ["er", "he"], ["sie", "she"], ["es", "it"], ["wir", "we"], ["ihr", "you all"], ["ich bin", "I am"], ["du bist", "you are"], ["er ist", "he is"], ["wir sind", "we are"], ["ihr seid", "you all are"], ["sie sind", "they are"], ["Wer bist du?", "Who are you?"], ["Ich bin Carol", "I am Carol"], ["Wer ist er?", "Who is he?"], ["Er ist Jeremiah", "He is Jeremiah"], ["Sie ist Mary", "She is Mary"], ["Bist du Mariana?", "Are you Mariana?"], ["Nein, ich bin Mercy", "No, I am Mercy"]] },
+    { id: "heissen", icon: "📛", color: C.gold, title: "Heißen", sub: "Names & yes/no questions",
+        words: [["ich heiße", "I am called"], ["du heißt", "you are called"], ["er heißt", "he is called"], ["wir heißen", "we are called"], ["ihr heißt", "you all are called"], ["sie heißen", "they are called"], ["Wie heißt du?", "What are you called?"], ["Ich heiße Mercy Carol Mutinda", "I am called Mercy Carol Mutinda"], ["Wie heißt er?", "What is he called?"], ["Sie heißt Terry", "She is called Terry"], ["Heißt du Mercy?", "Are you called Mercy?"], ["Ja, ich heiße Mercy", "Yes, I am called Mercy"], ["Nein, ich heiße Leah", "No, I am called Leah"], ["Heißt er Jeremiah?", "Is he called Jeremiah?"], ["Nein, er heißt Joshua", "No, he is called Joshua"], ["Sie heißen Emily und Faith", "They are called Emily and Faith"]] },
+    { id: "marital", icon: "💍", color: C.ink, title: "Familienstand", sub: "Marital status",
+        words: [["verheiratet", "married"], ["ledig", "single"], ["geschieden", "divorced"], ["getrennt", "separated"], ["verlobt", "engaged"], ["verliebt", "in love"], ["verwitwet", "widowed"], ["in einer Beziehung", "in a relationship"], ["Bist du verheiratet?", "Are you married?"], ["Ja, ich bin verheiratet", "Yes, I'm married"], ["Nein, ich bin ledig", "No, I'm single"]] },
+    { id: "adj", icon: "💪", color: C.red, title: "Die Adjektive", sub: "Describing words",
+        words: [["groß", "big / tall"], ["klein", "small"], ["glücklich", "happy"], ["traurig", "sad"], ["schön", "beautiful"], ["hässlich", "ugly"], ["krank", "sick"], ["gesund", "healthy"], ["hungrig", "hungry"], ["satt", "satisfied / full"], ["durstig", "thirsty"], ["müde", "tired"], ["stark", "strong"], ["schwach", "weak"], ["fleißig", "hardworking"], ["faul", "lazy"], ["arm", "poor"], ["reich", "rich"], ["Bist du reich?", "Are you rich?"], ["Ich bin nicht schwach, ich bin stark", "I am not weak, I am strong"]] },
+    { id: "verbs", icon: "⚙️", color: C.green, title: "Die Verben", sub: "Conjugation drills", special: "conj",
+        words: [["kommen", "to come"], ["gehen", "to go"], ["wohnen", "to live / stay"], ["leben", "to live"], ["lernen", "to learn"], ["machen", "to do / make"], ["spielen", "to play"], ["arbeiten", "to work"], ["warten", "to wait"], ["reisen", "to travel"], ["schreiben", "to write"], ["meinen", "to mean / think"], ["studieren", "to study"], ["buchstabieren", "to spell"]] },
+    { id: "haben", icon: "👨‍👩‍👧", color: C.gold, title: "Haben & Familie", sub: "Children, money & things",
+        words: [["ich habe", "I have"], ["du hast", "you have"], ["er hat", "he has"], ["wir haben", "we have"], ["ihr habt", "you all have"], ["sie haben", "they have"], ["das Kind", "child"], ["die Kinder", "children"], ["der Junge", "boy"], ["das Mädchen", "girl"], ["das Geld", "money"], ["das Feuer", "fire / lighter"], ["etwas", "some / something"], ["leider", "unfortunately"], ["Wie viele Kinder hast du?", "How many children do you have?"], ["Ich habe zwei Kinder", "I have two kids"], ["Zwei Jungen und ein Mädchen", "Two boys and one girl"], ["Hast du Kinder?", "Do you have children?"], ["Nein, ich habe keine Kinder", "No, I have no children"], ["Hast du Feuer?", "Do you have a lighter?"], ["Ja, hier bitte", "Yes, here please"], ["Nein, leider nicht", "No, unfortunately not"], ["Habt ihr Geld?", "Do you all have money?"], ["Ja, wir haben 500 Schilling", "Yes, we have 500 shillings"], ["Nein, wir haben kein Geld", "No, we have no money"]] },
+    { id: "numbers", icon: "🔢", color: C.ink, title: "Die Zahlen", sub: "Numbers 0–1000", special: "numbers",
+        words: [["null", "0"], ["eins", "1"], ["zwei", "2"], ["drei", "3"], ["vier", "4"], ["fünf", "5"], ["sechs", "6"], ["sieben", "7"], ["acht", "8"], ["neun", "9"], ["zehn", "10"], ["elf", "11"], ["zwölf", "12"]] },
+    { id: "ordinals", icon: "🥇", color: C.red, title: "Ordnungszahlen", sub: "1st, 2nd, 3rd…", noType: true,
+        words: [["erste", "1st"], ["zweite", "2nd"], ["dritte", "3rd"], ["vierte", "4th"], ["fünfte", "5th"], ["sechste", "6th"], ["siebte", "7th"], ["achte", "8th"], ["neunte", "9th"], ["zehnte", "10th"], ["elfte", "11th"], ["zwölfte", "12th"], ["dreizehnte", "13th"], ["fünfzehnte", "15th"], ["zwanzigste", "20th"], ["einundzwanzigste", "21st"], ["fünfundzwanzigste", "25th"], ["dreißigste", "30th"], ["einunddreißigste", "31st"]] },
+    { id: "time", icon: "⏰", color: C.green, title: "Die Zeit", sub: "Time units & days",
+        words: [["die Sekunde", "second"], ["die Minute", "minute"], ["die Stunde", "hour"], ["der Tag", "day"], ["die Nacht", "night"], ["die Woche", "week"], ["der Monat", "month"], ["das Jahr", "year"], ["der Morgen", "morning"], ["der Vormittag", "before noon"], ["der Mittag", "noon"], ["der Nachmittag", "afternoon"], ["der Abend", "evening"], ["die Mitternacht", "midnight"], ["der Montag", "Monday"], ["der Dienstag", "Tuesday"], ["der Mittwoch", "Wednesday"], ["der Donnerstag", "Thursday"], ["der Freitag", "Friday"], ["der Samstag", "Saturday"], ["der Sonntag", "Sunday"], ["am Montag", "on Monday"], ["Montagabend", "Monday evening"], ["Dienstagnachmittag", "Tuesday afternoon"], ["Freitagmorgen", "Friday morning"], ["Samstagvormittag", "Saturday before noon"], ["der Sonnabend", "Saturday (alternative name)"]] },
+    { id: "timeexp", icon: "📅", color: C.gold, title: "Zeitausdrücke", sub: "Today, tomorrow…",
+        words: [["heute", "today"], ["gestern", "yesterday"], ["vorgestern", "day before yesterday"], ["morgen", "tomorrow"], ["übermorgen", "day after tomorrow"], ["heute Morgen", "this morning"], ["heute Abend", "this evening"], ["morgen früh", "tomorrow morning"], ["gestern Abend", "yesterday evening"], ["gestern Nachmittag", "yesterday afternoon"], ["morgen Mittag", "tomorrow noon"], ["letzte Woche", "last week"], ["letzten Monat", "last month"], ["letztes Jahr", "last year"], ["letzte Nacht", "last night"], ["nächste Woche", "next week"], ["nächsten Monat", "next month"], ["nächstes Jahr", "next year"], ["jeden Tag", "every day"], ["jede Woche", "every week"], ["jeden Monat", "every month"], ["jedes Jahr", "every year"], ["diese Woche", "this week"], ["diesen Monat", "this month"], ["dieses Jahr", "this year"]] },
+    { id: "months", icon: "🍂", color: C.ink, title: "Monate & Jahreszeiten", sub: "Months & seasons",
+        words: [["der Januar", "January"], ["der Februar", "February"], ["der März", "March"], ["der April", "April"], ["der Mai", "May"], ["der Juni", "June"], ["der Juli", "July"], ["der August", "August"], ["der September", "September"], ["der Oktober", "October"], ["der November", "November"], ["der Dezember", "December"], ["der Winter", "winter (Eis, Schnee, kalt)"], ["der Frühling", "spring (Regen, Wind, grün)"], ["der Sommer", "summer (Sonne, warm, heiß)"], ["der Herbst", "autumn (leaves fall down)"], ["das Eis", "ice"], ["der Schnee", "snow"], ["kalt", "cold"], ["der Regen", "rain"], ["der Wind", "wind"], ["grün", "green"], ["die Sonne", "sun"], ["warm", "warm"], ["heiß", "hot"]] },
+    { id: "birthday", icon: "🎂", color: C.red, title: "Geburtstag & Datum", sub: "Birthdays, years & dates", special: "years",
+        words: [["der Geburtsort", "place of birth"], ["der Geburtstag", "birthday"], ["das Geburtsdatum", "date of birth"], ["geboren", "born"], ["Wo bist du geboren?", "Where were you born?"], ["Ich bin in Machakos geboren", "I was born in Machakos"], ["Wann hast du Geburtstag?", "When is your birthday?"], ["Mein Geburtstag ist am sechzehnten April", "My birthday is on the 16th of April"], ["Welches Datum haben wir morgen?", "What is the date tomorrow?"], ["Morgen ist Freitag, der fünfte Dezember", "Tomorrow is Friday, the 5th of December"], ["Übermorgen ist Samstag, der sechste Dezember", "The day after tomorrow is Saturday, the 6th of December"], ["Wann ist übermorgen?", "When is the day after tomorrow?"], ["Ich bin am einundzwanzigsten Mai zweitausendeins in Mombasa geboren", "I was born on the 21st of May 2001 in Mombasa"]] },
+];
+const SECTIONS = [
+    { name: "Die Grundlagen · The Basics", ids: ["alphabet", "pronun", "greet"] },
+    { name: "Über dich & mich · About You & Me", ids: ["intro", "origin", "pron", "heissen", "marital", "adj"] },
+    { name: "Grammatik · Grammar Power", ids: ["verbs", "haben"] },
+    { name: "Zahlen & Zeit · Numbers & Time", ids: ["numbers", "ordinals", "time", "timeexp", "months", "birthday"] },
+];
+/* ---------- LEKTION 1 (Wortschatz, Familie, Berufe, Dialoge, Preise) ---------- */
+const L1_UNITS = [
+    { id: "l1_verbs", icon: "🏃", color: C.green, title: "Wortschatz: Verben", sub: "Lektion 1 verbs",
+        words: [["arbeiten", "to work"], ["buchstabieren", "to spell"], ["fragen", "to ask"], ["haben", "to have"], ["heißen", "to be called"], ["hören", "to hear / listen"], ["kommen", "to come"], ["leben", "to live"], ["lernen", "to learn"], ["lesen", "to read"], ["machen", "to do / make"], ["meinen", "to mean / think"], ["möchten", "would like"], ["reisen", "to travel"], ["schreiben", "to write"], ["sein", "to be"], ["spielen", "to play"], ["sprechen", "to speak"], ["studieren", "to study"], ["warten", "to wait"], ["werden", "to become"], ["wohnen", "to live / stay"]] },
+    { id: "l1_nouns", icon: "📦", color: C.gold, title: "Wortschatz: Nomen", sub: "Lektion 1 nouns",
+        words: [["das Alter", "age"], ["der Ausländer", "foreigner (male)"], ["die Ausländerin", "foreigner (female)"], ["der Beruf", "profession / occupation"], ["der Familienstand", "marital status"], ["der Familienname", "surname"], ["der Vorname", "first name"], ["die Eltern", "parents"], ["die Frau", "Mrs / wife"], ["der Geburtstag", "birthday"], ["die Hausfrau", "housewife"], ["der Herr", "Mr / gentleman"], ["das Hobby", "hobby"], ["die Hobbys", "hobbies"], ["das Jahr", "year"], ["der Kaufmann", "salesman"], ["die Kauffrau", "saleswoman"], ["das Kind", "child"], ["die Kinder", "children"], ["der Kurs", "course"], ["das Land", "country"], ["die Leute", "people"], ["die Lösung", "solution / key"], ["der Mechaniker", "mechanic"], ["der Monat", "month"], ["der Name", "name"], ["der Ort", "place"], ["die Postkarte", "postcard"], ["der Fotograf", "photographer"], ["die Adresse", "address"], ["die Telefonnummer", "telephone number"], ["die Postleitzahl", "postal code"]] },
+    { id: "l1_adjadv", icon: "✨", color: C.red, title: "Adjektive & Adverbien", sub: "Small but mighty words",
+        words: [["alt", "old"], ["berufstätig", "working / employed"], ["frei", "free"], ["geschieden", "divorced"], ["gut", "good"], ["klein", "small / young"], ["ledig", "single"], ["verheiratet", "married"], ["neu", "new"], ["bitte", "please"], ["da", "there"], ["erst", "only / just (not more than)"], ["etwa", "approximately"], ["hier", "here"], ["jetzt", "now"], ["leider", "unfortunately"], ["nicht", "not"], ["noch", "still"], ["noch einmal", "once again"], ["schon", "already"], ["übrigens", "by the way"], ["aber", "but"], ["zusammen", "together"], ["sehr", "very"], ["einfach", "simple"], ["zur Zeit", "at the moment"], ["bei", "with / by / near"], ["denn", "because / then"], ["von", "of / from"], ["in", "in"], ["man", "one / somebody"], ["und", "and"], ["ja", "yes"], ["nein", "no"]] },
+    { id: "l1_ausdruecke", icon: "💬", color: C.ink, title: "Ausdrücke", sub: "Everyday expressions", noType: true,
+        words: [["Ach so!", "Oh, I see!"], ["Auf Wiedersehen!", "Goodbye!"], ["Bitte schön!", "You're welcome!"], ["Entschuldigung!", "Excuse me / I'm sorry"], ["Es geht!", "It's okay / moving on"], ["Hallo!", "Hello!"], ["Macht nichts!", "It doesn't matter"], ["Wie bitte?", "Pardon?"], ["Noch einmal, bitte langsam!", "Once again, please slowly!"], ["Ist hier noch frei?", "Is this seat still free?"], ["Ja, bitte", "Yes, please / here you go"], ["Nein, leider nicht", "No, unfortunately not"], ["Danke schön!", "Thank you!"], ["Wie geht es Ihnen?", "How are you? (formal)"], ["Ach was!", "It does not matter!"]] },
+    { id: "l1_family", icon: "👪", color: C.green, title: "Die Familie", sub: "Family members",
+        words: [["der Vater", "father"], ["die Mutter", "mother"], ["die Eltern", "parents"], ["der Sohn", "son"], ["die Tochter", "daughter"], ["der Bruder", "brother"], ["die Schwester", "sister"], ["der Onkel", "uncle"], ["die Tante", "aunt"], ["der Großvater", "grandfather"], ["die Großmutter", "grandmother"], ["der Vetter", "male cousin"], ["die Kusine", "female cousin"], ["der Neffe", "nephew"], ["die Nichte", "niece"], ["der Junge", "boy"], ["das Mädchen", "girl"], ["der Enkel", "grandson"], ["die Enkelin", "granddaughter"], ["der Schwiegervater", "father-in-law"], ["die Schwiegermutter", "mother-in-law"], ["der Schwager", "brother-in-law"], ["die Schwägerin", "sister-in-law"], ["der Stiefvater", "stepfather"], ["die Stiefmutter", "stepmother"], ["die Dame", "lady"], ["der Freund", "friend / boyfriend"], ["die Freundin", "friend / girlfriend"], ["der Nachbar", "neighbor"], ["der Kollege", "colleague"], ["der König", "king"], ["die Königin", "queen"], ["der Prinz", "prince"], ["die Prinzessin", "princess"], ["Meine Schwester ist mit Emmanuel verheiratet — er ist mein Schwager", "My sister is married to Emmanuel — he is my brother-in-law"], ["Mein Onkel hat drei Töchter — sie sind meine Kusinen", "My uncle has three daughters — they are my cousins"], ["der Mensch", "human being"], ["die Person", "person"], ["der Verwandte", "relative"], ["der Bekannte", "acquaintance"], ["der Klassenkamerad", "classmate"]] },
+    { id: "l1_berufe", icon: "🧑‍🍳", color: C.gold, title: "Die Berufe", sub: "Professions",
+        words: [["der Lehrer / die Lehrerin", "teacher"], ["der Kellner / die Kellnerin", "waiter / waitress"], ["der Koch / die Köchin", "cook"], ["der Gärtner", "gardener"], ["der Bäcker", "baker"], ["der Sekretär / die Sekretärin", "secretary"], ["der Leiter", "manager"], ["der Sänger / die Sängerin", "singer"], ["der Tänzer / die Tänzerin", "dancer"], ["der Ingenieur", "engineer"], ["der Mechaniker", "mechanic"], ["der Arzt / die Ärztin", "doctor"], ["die Krankenschwester", "nurse"], ["der Zahnarzt", "dentist"], ["der Tierarzt", "vet"], ["der Polizist / die Polizistin", "police officer"], ["der Programmierer", "programmer"], ["der Geschäftsmann", "businessman"], ["die Geschäftsfrau", "businesswoman"], ["der Künstler", "artist"], ["der Dolmetscher", "interpreter"], ["der Rechtsanwalt", "lawyer"], ["der Richter", "judge"], ["der Professor", "professor"], ["der Fahrer", "driver"], ["der Schauspieler", "actor"], ["der Schriftsteller", "writer"], ["der Buchhalter", "accountant"], ["der Fußballspieler", "footballer"], ["der Apotheker", "pharmacist"], ["der Landwirt", "farmer"], ["der Bauer", "peasant farmer"], ["der Schneider", "tailor"], ["der Tischler", "carpenter"], ["der Flugbegleiter", "flight attendant"], ["die Reiseleiterin", "tour guide (female)"], ["der Chemiker", "chemist"], ["der Verkaufsleiter", "sales manager"], ["der Rentner / die Rentnerin", "pensioner"], ["der Student / die Studentin", "student (university)"], ["der Zeichner", "illustrator / drawer"], ["der Zuschauer", "spectator"], ["der Rezeptionist / die Rezeptionistin", "receptionist"], ["der Bademeister", "pool attendant"], ["die Zimmerfrau", "room steward"], ["der Telefonist / die Telefonistin", "telephone operator"], ["der Animateur", "animator / entertainer"], ["der Beamte / die Beamtin", "civil servant"]] },
+    { id: "l1_beruf_fragen", icon: "🗂️", color: C.red, title: "Beruf: Fragen", sub: "Talking about your job", noType: true,
+        words: [["Was ist Ihr Beruf?", "What is your profession? (formal)"], ["Was ist dein Beruf?", "What is your profession? (informal)"], ["Was sind Sie von Beruf?", "What are you by profession?"], ["Was arbeitest du?", "What is your job?"], ["Was sind Sie beruflich?", "What are you professionally?"], ["Ich bin Ärztin von Beruf", "I am a doctor by profession"], ["Ich arbeite als Chemiker", "I work as a chemist"], ["Ich habe keine Arbeit", "I don't have a job"], ["Ich arbeite nicht", "I am not working"], ["Ich bin arbeitslos", "I am jobless"], ["Ich bin Studentin", "I am a student"], ["Ich bin Schülerin", "I am a pupil"], ["Ich mache zur Zeit eine Ausbildung", "I'm doing vocational training at the moment"], ["Ich mache jetzt ein Praktikum", "I'm doing an internship now"], ["berufstätig sein", "to be working / employed"], ["beschäftigt sein", "to be busy"], ["Welche Tätigkeit üben Sie aus?", "Which job do you practise?"]] },
+    { id: "l1_dialog", icon: "🪑", color: C.ink, title: "Dialog: Ist hier noch frei?", sub: "Small talk like a local", noType: true,
+        words: [["Ist hier noch frei?", "Is this seat still free?"], ["Ja, bitte", "Yes, please"], ["Sind Sie neu hier?", "Are you new here?"], ["Ich arbeite erst drei Tage hier", "I've only been working here three days"], ["Und was machen Sie?", "And what do you do?"], ["Ich bin Ingenieur", "I am an engineer"], ["Übrigens, ich heiße Klaus Henkel", "By the way, my name is Klaus Henkel"], ["Kommen Sie aus England?", "Do you come from England?"], ["Nein, aus Neuseeland", "No, from New Zealand"], ["Sie sprechen aber schon gut Deutsch", "But you already speak good German"], ["Na ja, es geht", "Well, it's okay"], ["Habt ihr Feuer?", "Do you all have a light?"], ["Wartet ihr hier schon lange?", "Have you all been waiting here long?"], ["Erst zwei Minuten", "Only two minutes"], ["Wo liegt das denn?", "Where is that located?"], ["Bei Wien", "Near Vienna"], ["Wohin möchtet ihr?", "Where would you all like to go?"], ["Nach Stuttgart", "To Stuttgart"], ["schon", "already (more than expected)"], ["erst", "only / just (less than expected)"]] },
+    { id: "l1_moechten", icon: "🧭", color: C.green, title: "Möchten & Gehen", sub: "Where would you like to go?",
+        words: [["ich möchte", "I would like"], ["du möchtest", "you would like"], ["er möchte", "he would like"], ["wir möchten", "we would like"], ["ihr möchtet", "you all would like"], ["Wohin?", "Where to?"], ["Wohin möchtest du?", "Where would you like to go?"], ["Ich gehe nach Nairobi", "I'm going to Nairobi"], ["Ich gehe nach Hause", "I'm going home"], ["Ich gehe zur Arbeit", "I'm going to work"], ["Ich gehe zur Schule", "I'm going to school"], ["Ich gehe zum Markt", "I'm going to the market"], ["Ich gehe zum Supermarkt", "I'm going to the supermarket"], ["nach", "to (cities, countries, home)"], ["zur", "to the (feminine 'die' places)"], ["zum", "to the ('der' and 'das' places)"]] },
+    { id: "l1_konj", icon: "🔧", color: C.gold, title: "Konjugation", sub: "haben, sein, möchten & more", special: "conj2",
+        words: [["haben", "to have"], ["sein", "to be"], ["möchten", "would like"], ["gehen", "to go"], ["heißen", "to be called"], ["arbeiten", "to work"], ["warten", "to wait"], ["sprechen", "to speak"]] },
+    { id: "l1_euro", icon: "💶", color: C.red, title: "Wie teuer? & Mathe", sub: "Prices & maths in German", special: "euro",
+        words: [["mal", "times (×)"], ["geteilt durch", "divided by (÷)"], ["plus", "plus (+)"], ["minus", "minus (−)"], ["Wie viel ist das?", "How much is that?"], ["Wie teuer ist das?", "How expensive is that?"], ["der Euro", "euro (€)"], ["Wie ist die Postleitzahl von Tann?", "What is the postal code of Tann?"], ["die Telefonnummer", "telephone number"], ["Wie ist Ihre Adresse?", "What is your address?"]] },
+];
+const L1_SECTIONS = [
+    { name: "Wortschatz · Vocabulary", ids: ["l1_verbs", "l1_nouns", "l1_adjadv", "l1_ausdruecke"] },
+    { name: "Leute & Familie · People & Family", ids: ["l1_family", "l1_berufe", "l1_beruf_fragen"] },
+    { name: "Sprechen · Conversation", ids: ["l1_dialog", "l1_moechten", "l1_konj"] },
+    { name: "Preise & Zahlen · Prices & Numbers", ids: ["l1_euro"] },
+];
+/* ---------- LEKTION 2 (Haushalt, Artikel, Plural, er/sie/es, Kaputt-Dialoge) ---------- */
+const L2_UNITS = [
+    { id: "l2_verbs", icon: "🛠️", color: C.green, title: "Wortschatz: Verben", sub: "Lektion 2 verbs",
+        words: [["antworten", "to answer"], ["bekommen", "to receive / get"], ["bieten", "to offer"], ["entschuldigen", "to excuse"], ["fahren", "to travel / drive"], ["funktionieren", "to function / work"], ["können", "to be able to / can"], ["korrigieren", "to correct"], ["kosten", "to cost"], ["sagen", "to say"], ["spülen", "to wash dishes"], ["stimmen", "to be correct"], ["waschen", "to wash"], ["wechseln", "to change"], ["entscheiden", "to decide"], ["gehen", "to go / to work (machines)"]] },
+    { id: "l2_haushalt", icon: "🏠", color: C.gold, title: "Haushalt & Technik", sub: "Around the house",
+        words: [["der Kühlschrank", "refrigerator"], ["der Herd", "cooker / stove"], ["die Waschmaschine", "washing machine"], ["die Spülmaschine", "dishwasher"], ["der Geschirrspüler", "dishwasher (other word)"], ["die Mikrowelle", "microwave"], ["der Fernsehapparat", "television set"], ["die Fernbedienung", "remote control"], ["der Kugelschreiber", "pen / biro"], ["die Mine", "pen refill"], ["der Taschenrechner", "calculator"], ["die Taschenlampe", "torch / flashlight"], ["die Glühbirne", "bulb"], ["die Steckdose", "socket"], ["der Stecker", "plug"], ["der Wasserhahn", "water tap"], ["das Waschbecken", "washing basin"], ["die Spüle", "sink"], ["der Abfalleimer", "dustbin"], ["die Lampe", "lamp"], ["die Uhr", "watch / clock"], ["die Batterie", "battery"], ["die Kamera", "camera"], ["das Radio", "radio"], ["das Handy", "mobile phone"], ["das Telefon", "telephone"], ["das Auto", "car"], ["das Benzin", "petrol"], ["das Regal", "shelf"], ["der Schrank", "cupboard / wardrobe"], ["der Topf", "saucepan / pot"], ["die Küche", "kitchen"], ["das Bett", "bed"], ["der Spiegel", "mirror"], ["das Handtuch", "towel"], ["der Teppich", "carpet"], ["das Sofa", "sofa"], ["die Blume", "flower"], ["das Geld", "money"], ["das Geschäft", "business / shop"], ["der Fehler", "mistake"], ["das Problem", "problem"], ["die Zeit", "time"], ["die Parkuhr", "parking meter"], ["der Haushalt", "household"], ["das Bild", "picture"], ["das Foto", "photo"], ["das Haus", "house"], ["das Programm", "programme"], ["der Fotoapparat", "camera (photo apparatus)"], ["der Fernseher", "TV"], ["das Fernsehgerät", "TV set"], ["die Couch", "couch"], ["der Schuh", "shoe"], ["der Helm", "helmet"], ["der Elektroherd", "electric cooker"], ["die Antwort", "answer"], ["die Gruppe", "group"], ["die Idee", "idea"], ["die Karte", "card"], ["die Kassette", "cassette"], ["das Wort", "word"], ["der Wert", "value"], ["die Zahl", "number"]] },
+    { id: "l2_schule", icon: "✏️", color: C.red, title: "Schule & Büro", sub: "Classroom & office things",
+        words: [["die Tafel", "blackboard"], ["die Kreide", "chalk"], ["der Bleistift", "pencil"], ["der Kuli", "pen"], ["der Füller", "fountain pen"], ["der Radiergummi", "rubber / eraser"], ["das Lineal", "ruler"], ["das Buch", "book"], ["das Heft", "exercise book"], ["das Wörterbuch", "dictionary"], ["die Zeitung", "newspaper"], ["die Zeitschrift", "magazine"], ["die Tasche", "bag"], ["die Schultasche", "school bag"], ["der Koffer", "suitcase"], ["die Reisetasche", "travelling bag"], ["der Schreibtisch", "desk"], ["die Klasse", "class"], ["die Wand", "wall"], ["der Boden", "floor"], ["das Fenster", "window"], ["die Tür", "door"], ["das Tor", "gate"], ["das Dach", "roof"], ["der Locher", "hole punch"], ["der Stempel", "rubber stamp"], ["das Papier", "paper"], ["die Büroklammer", "paper clip"], ["der Besen", "broom"], ["die Schere", "scissors"], ["die Ecke", "corner"], ["der Ventilator", "fan"], ["das Dorf", "village"], ["die Stadt", "town / city"], ["der Kamm", "comb"], ["die Haarbürste", "hairbrush"], ["der Föhn", "hairdryer"], ["die Zahnpasta", "toothpaste"], ["der Kleber", "glue"], ["der Hefter", "stapler"], ["der Fremde", "stranger"], ["der Stift", "pencil / pen"]] },
+    { id: "l2_adjadv", icon: "🧭", color: C.ink, title: "Adjektive & mehr", sub: "kaputt, leer, lustig…",
+        words: [["ähnlich", "similar"], ["bequem", "comfortable"], ["ehrlich", "honest"], ["kaputt", "broken"], ["leer", "empty / flat"], ["lustig", "amusing / funny"], ["modern", "modern"], ["originell", "original / novel"], ["praktisch", "practical"], ["auch", "also"], ["heute", "today"], ["morgen", "tomorrow"], ["sehr", "very"], ["oder", "or"], ["sondern", "but (after a negative)"], ["alle (sein)", "all gone / used up"], ["aus sein", "to be off / over"], ["raus sein", "to be out / excluded"], ["zu (sein)", "turned off / closed"], ["der Norden", "the north"], ["der Süden", "the south"], ["der Osten", "the east"], ["der Westen", "the west"]] },
+    { id: "l2_artikel", icon: "🎯", color: C.green, title: "Der, die oder das?", sub: "The article game", special: "artikel",
+        artikel: [["Lampe", "die", "lamp"], ["Tisch", "der", "table"], ["Stuhl", "der", "chair"], ["Bild", "das", "picture"], ["Auto", "das", "car"], ["Uhr", "die", "watch / clock"], ["Radio", "das", "radio"], ["Kühlschrank", "der", "refrigerator"], ["Küche", "die", "kitchen"], ["Fenster", "das", "window"], ["Tür", "die", "door"], ["Buch", "das", "book"], ["Zeitung", "die", "newspaper"], ["Bleistift", "der", "pencil"], ["Stecker", "der", "plug"], ["Steckdose", "die", "socket"], ["Waschmaschine", "die", "washing machine"], ["Waschbecken", "das", "washing basin"], ["Herd", "der", "cooker"], ["Mikrowelle", "die", "microwave"], ["Regal", "das", "shelf"], ["Foto", "das", "photo"], ["Batterie", "die", "battery"], ["Idee", "die", "idea"], ["Telefon", "das", "telephone"], ["Blume", "die", "flower"], ["Spiegel", "der", "mirror"], ["Haus", "das", "house"], ["Topf", "der", "pot"], ["Kugelschreiber", "der", "pen"], ["Schuh", "der", "shoe"], ["Helm", "der", "helmet"], ["Bett", "das", "bed"], ["Handy", "das", "mobile phone"], ["Heft", "das", "exercise book"], ["Tafel", "die", "blackboard"], ["Schere", "die", "scissors"], ["Papier", "das", "paper"], ["Dorf", "das", "village"], ["Stadt", "die", "town"], ["Wand", "die", "wall"], ["Boden", "der", "floor"], ["Dach", "das", "roof"], ["Sofa", "das", "sofa"], ["Teppich", "der", "carpet"], ["Spüle", "die", "sink"], ["Handtuch", "das", "towel"], ["Kamm", "der", "comb"], ["Schrank", "der", "cupboard"], ["Benzin", "das", "petrol"], ["Geld", "das", "money"], ["Wort", "das", "word"], ["Antwort", "die", "answer"], ["Karte", "die", "card"], ["Zeit", "die", "time"], ["Problem", "das", "problem"], ["Geschäft", "das", "shop"], ["Mine", "die", "pen refill"], ["Taschenrechner", "der", "calculator"]],
+        words: [["der (bestimmter Artikel)", "the (masculine)"], ["die (bestimmter Artikel)", "the (feminine / plural)"], ["das (bestimmter Artikel)", "the (neuter)"], ["ein / eine", "a / an"], ["Nomen mit -er sind oft maskulin", "nouns ending in -er are often masculine"], ["Nomen mit -e sind oft feminin", "nouns ending in -e are often feminine"]] },
+    { id: "l2_plural", icon: "👯", color: C.gold, title: "Singular & Plural", sub: "One Stuhl, many Stühle", special: "plural",
+        plural: [["das Telefon", "die Telefone"], ["das Regal", "die Regale"], ["der Arzt", "die Ärzte"], ["der Stuhl", "die Stühle"], ["der Tisch", "die Tische"], ["der Topf", "die Töpfe"], ["die Lampe", "die Lampen"], ["die Batterie", "die Batterien"], ["die Uhr", "die Uhren"], ["die Zahl", "die Zahlen"], ["die Frau", "die Frauen"], ["der Stecker", "die Stecker"], ["der Kugelschreiber", "die Kugelschreiber"], ["die Mutter", "die Mütter"], ["das Bild", "die Bilder"], ["das Land", "die Länder"], ["das Kind", "die Kinder"], ["der Mann", "die Männer"], ["das Foto", "die Fotos"], ["das Auto", "die Autos"], ["das Radio", "die Radios"], ["das Handy", "die Handys"], ["das Haus", "die Häuser"], ["die Spülmaschine", "die Spülmaschinen"], ["die Glühbirne", "die Glühbirnen"], ["der Name", "die Namen"], ["der Ausländer", "die Ausländer"], ["das Waschbecken", "die Waschbecken"], ["der Wasserhahn", "die Wasserhähne"], ["der Fernsehapparat", "die Fernsehapparate"], ["der Beruf", "die Berufe"], ["die Sekunde", "die Sekunden"], ["die Minute", "die Minuten"], ["die Stunde", "die Stunden"], ["der Tag", "die Tage"], ["die Nacht", "die Nächte"], ["die Woche", "die Wochen"], ["der Monat", "die Monate"], ["das Jahr", "die Jahre"]],
+        words: [["die Telefone", "the telephones"], ["die Stühle", "the chairs"], ["die Männer", "the men"], ["die Kinder", "the children"]] },
+    { id: "l2_keinposs", icon: "🙅", color: C.red, title: "Ein, kein & Possessiv", sub: "mein, dein, kein…", noType: true,
+        words: [["mein / meine", "my"], ["dein / deine", "your (informal)"], ["Ihr / Ihre", "your (formal)"], ["sein / seine", "his"], ["ihr / ihre", "her / their"], ["unser / unsere", "our"], ["euer / eure", "your (plural)"], ["kein / keine", "not a / no"], ["Ist das ein Auto?", "Is that a car?"], ["Ja, das ist ein Auto", "Yes, that is a car"], ["Nein, das ist kein Auto", "No, that is not a car"], ["Sind das Autos?", "Are those cars?"], ["Nein, das sind keine Autos", "No, those are not cars"], ["Ist das deine Schwester?", "Is that your sister?"], ["Ja, das ist meine Schwester", "Yes, that is my sister"], ["Ist das dein Koffer?", "Is that your suitcase?"], ["Das ist mein Kühlschrank", "That is my refrigerator"], ["Das ist unsere Spüle", "That is our sink"], ["Das ist sein Radio", "That is his radio"], ["Da ist kein Elektroherd", "There is no electric cooker"], ["Da sind keine Stühle", "There are no chairs"]] },
+    { id: "l2_ersiees", icon: "🔄", color: C.ink, title: "Er, sie oder es?", sub: "Pronouns for things", special: "ersiees",
+        fill: [["Das ist eine Leica. ___ fotografiert noch sehr gut.", "sie", "die Leica (feminine)"], ["Das ist Karins Kugelschreiber. ___ schreibt sehr gut.", "er", "der Kugelschreiber (masculine)"], ["Das ist der Reiseleiter. ___ wohnt in Ulm.", "er", "der Reiseleiter (masculine)"], ["Frau Benz ist nicht berufstätig. ___ ist Hausfrau.", "sie", "Frau Benz (a woman)"], ["Das sind Inge und Karin. ___ sind noch Schülerinnen.", "sie", "two people (plural)"], ["Das ist Bernds Auto. ___ ist zehn Jahre alt.", "es", "das Auto (neuter)"], ["Das sind Batterien. ___ sind für Kameras.", "sie", "die Batterien (plural)"], ["Der Küchenstuhl ist bequem. ___ kostet 185 Euro.", "er", "der Stuhl (masculine)"], ["Das ist eine Mikrowelle. ___ kostet 568 Euro.", "sie", "die Mikrowelle (feminine)"], ["Das ist ein Regal. ___ ist sehr praktisch.", "es", "das Regal (neuter)"], ["Mein Auto fährt nicht. ___ ist kaputt.", "es", "das Auto (neuter)"], ["Die Uhr ist neu. ___ kostet 100.000 Schilling.", "sie", "die Uhr (feminine)"], ["Der Herd ist sehr modern. ___ kostet 987 Euro.", "er", "der Herd (masculine)"], ["Die Lampe hat vier Glühbirnen. ___ kostet 157 Euro.", "sie", "die Lampe (feminine)"]],
+        words: [["der → er", "masculine things become 'er'"], ["die → sie", "feminine things become 'sie'"], ["das → es", "neuter things become 'es'"], ["die (Plural) → sie", "plural things become 'sie'"]] },
+    { id: "l2_kaputt", icon: "🔧", color: C.green, title: "Kaputt! Dialoge", sub: "When things don't work", noType: true,
+        words: [["Mein Auto fährt nicht!", "My car doesn't drive!"], ["Was sagst du?", "What are you saying?"], ["Ja, es ist kaputt", "Yes, it is broken"], ["Nein, es ist nicht kaputt", "No, it is not broken"], ["Das Benzin ist alle", "The petrol is all gone"], ["Mein Kugelschreiber schreibt nicht!", "My pen doesn't write!"], ["Die Mine ist leer", "The refill is empty"], ["Meine Waschmaschine funktioniert nicht!", "My washing machine doesn't work!"], ["Der Stecker ist raus", "The plug is out"], ["Meine Spülmaschine spült nicht!", "My dishwasher doesn't wash!"], ["Der Wasserhahn ist zu", "The tap is turned off"], ["Der Taschenrechner geht nicht", "The calculator doesn't work"], ["Die Batterien sind leer", "The batteries are flat"], ["Das Fernsehgerät funktioniert nicht", "The TV doesn't work"], ["Die Fernbedienung ist kaputt", "The remote control is broken"], ["Ach so!", "Oh, I see!"], ["Entschuldigen Sie, was ist das denn?", "Excuse me, what is that then?"], ["Sag mal, was ist das denn?", "Tell me, what is that then?"], ["Wie bitte?", "Pardon?"], ["Funktioniert er?", "Does it work?"], ["Er ist sehr originell", "It is very original"], ["Sie ist sehr lustig", "It is very funny"], ["Ist sie praktisch?", "Is it practical?"]] },
+];
+const L2_SECTIONS = [
+    { name: "Wortschatz · Vocabulary", ids: ["l2_verbs", "l2_haushalt", "l2_schule", "l2_adjadv"] },
+    { name: "Grammatik · Grammar", ids: ["l2_artikel", "l2_plural", "l2_keinposs"] },
+    { name: "Sprechen · Conversation", ids: ["l2_ersiees", "l2_kaputt"] },
+];
+const CONJ_L1 = {
+    haben: { ich: "habe", du: "hast", "er/sie/es": "hat", wir: "haben", ihr: "habt", "Sie/sie": "haben" },
+    sein: { ich: "bin", du: "bist", "er/sie/es": "ist", wir: "sind", ihr: "seid", "Sie/sie": "sind" },
+    "möchten": { ich: "möchte", du: "möchtest", "er/sie/es": "möchte", wir: "möchten", ihr: "möchtet", "Sie/sie": "möchten" },
+    gehen: { ich: "gehe", du: "gehst", "er/sie/es": "geht", wir: "gehen", ihr: "geht", "Sie/sie": "gehen" },
+    "heißen": { ich: "heiße", du: "heißt", "er/sie/es": "heißt", wir: "heißen", ihr: "heißt", "Sie/sie": "heißen" },
+    arbeiten: { ich: "arbeite", du: "arbeitest", "er/sie/es": "arbeitet", wir: "arbeiten", ihr: "arbeitet", "Sie/sie": "arbeiten" },
+    warten: { ich: "warte", du: "wartest", "er/sie/es": "wartet", wir: "warten", ihr: "wartet", "Sie/sie": "warten" },
+    sprechen: { ich: "spreche", du: "sprichst", "er/sie/es": "spricht", wir: "sprechen", ihr: "sprecht", "Sie/sie": "sprechen" },
+};
+/* ---------- LEKTION 3 (Essen und Trinken: food, drinks, Akkusativ, restaurant, shopping) ---------- */
+const CONJ_L3 = {
+    essen: { ich: "esse", du: "isst", "er/sie/es": "isst", wir: "essen", ihr: "esst", "Sie/sie": "essen" },
+    trinken: { ich: "trinke", du: "trinkst", "er/sie/es": "trinkt", wir: "trinken", ihr: "trinkt", "Sie/sie": "trinken" },
+    nehmen: { ich: "nehme", du: "nimmst", "er/sie/es": "nimmt", wir: "nehmen", ihr: "nehmt", "Sie/sie": "nehmen" },
+    "mögen": { ich: "mag", du: "magst", "er/sie/es": "mag", wir: "mögen", ihr: "mögt", "Sie/sie": "mögen" },
+    brauchen: { ich: "brauche", du: "brauchst", "er/sie/es": "braucht", wir: "brauchen", ihr: "braucht", "Sie/sie": "brauchen" },
+    bekommen: { ich: "bekomme", du: "bekommst", "er/sie/es": "bekommt", wir: "bekommen", ihr: "bekommt", "Sie/sie": "bekommen" },
+    bestellen: { ich: "bestelle", du: "bestellst", "er/sie/es": "bestellt", wir: "bestellen", ihr: "bestellt", "Sie/sie": "bestellen" },
+    bezahlen: { ich: "bezahle", du: "bezahlst", "er/sie/es": "bezahlt", wir: "bezahlen", ihr: "bezahlt", "Sie/sie": "bezahlen" },
+    kaufen: { ich: "kaufe", du: "kaufst", "er/sie/es": "kauft", wir: "kaufen", ihr: "kauft", "Sie/sie": "kaufen" },
+    kochen: { ich: "koche", du: "kochst", "er/sie/es": "kocht", wir: "kochen", ihr: "kocht", "Sie/sie": "kochen" },
+    schmecken: { ich: "schmecke", du: "schmeckst", "er/sie/es": "schmeckt", wir: "schmecken", ihr: "schmeckt", "Sie/sie": "schmecken" },
+    einladen: { ich: "lade ein", du: "lädst ein", "er/sie/es": "lädt ein", wir: "laden ein", ihr: "ladet ein", "Sie/sie": "laden ein" },
+};
+const L3_UNITS = [
+    { id: "l3_verbs", icon: "🍳", color: C.green, title: "Wortschatz: Verben", sub: "Cooking, ordering, paying…",
+        words: [["backen", "to bake"], ["bestellen", "to order"], ["bezahlen", "to pay"], ["brauchen", "to need"], ["erkennen", "to recognise"], ["erzählen", "to tell"], ["essen", "to eat"], ["glauben", "to believe / think"], ["kaufen", "to buy"], ["kennen", "to know"], ["kochen", "to cook"], ["mögen", "to like"], ["nehmen", "to take"], ["schmecken", "to taste"], ["trinken", "to drink"], ["üben", "to practise"], ["bekommen", "to get / receive"], ["behalten", "to keep"], ["einladen", "to invite"], ["ablehnen", "to refuse"], ["absagen", "to cancel"], ["decken", "to set (the table)"], ["bringen", "to bring"]] },
+    { id: "l3_essen", icon: "🥖", color: C.gold, title: "Essen: Food", sub: "From Apfel to Zwiebel",
+        words: [["der Apfel", "apple"], ["die Banane", "banana"], ["die Bohne", "bean"], ["das Brot", "bread"], ["das Brötchen", "bread roll"], ["die Butter", "butter"], ["das Ei / die Eier", "egg / eggs"], ["das Eis", "ice cream"], ["die Erdbeere", "strawberry"], ["der Fisch", "fish"], ["das Fleisch", "meat"], ["die Frucht", "fruit"], ["das Obst", "fruit (collective)"], ["das Gemüse", "vegetables"], ["das Gewürz", "spice"], ["das Hähnchen", "chicken"], ["die Kartoffel", "potato"], ["der Käse", "cheese"], ["das Kotelett", "meat chop"], ["der Kuchen", "cake"], ["die Marmelade", "jam"], ["das Mehl", "flour"], ["der Nachtisch", "dessert"], ["die Nüsse", "nuts"], ["das Öl", "oil"], ["der Pfeffer", "pepper"], ["der Reis", "rice"], ["die Sahne", "cream"], ["der Salat", "salad"], ["der Schinken", "ham"], ["die Schokolade", "chocolate"], ["die Soße", "gravy / sauce"], ["das Steak", "steak"], ["die Suppe", "soup"], ["die Tomate", "tomato"], ["die Wurst", "sausage"], ["die Zwiebel", "onion"], ["der Zucker", "sugar"], ["die Kirschen", "cherries"], ["die Himbeere", "raspberry"], ["die Brombeere", "blackberry"], ["das Vollkornbrot", "wholegrain bread"], ["das Schwarzbrot", "brown / black bread"], ["das Weißbrot", "white bread"], ["der Maisbrei", "maize meal (ugali)"], ["die Pommes frites", "chips / fries"], ["das Rindfleisch", "beef"], ["das Schweinefleisch", "pork"], ["das Käsebrot", "cheese sandwich"], ["das Marmeladebrot", "jam sandwich"], ["das Wurstbrot", "sausage sandwich"], ["die Gurke", "cucumber"], ["der Pilz", "mushroom"], ["der Rotkohl", "red cabbage"], ["die Bratkartoffeln", "fried potatoes"], ["der Kartoffelsalat", "potato salad"], ["das Toastbrot", "toast bread"], ["der Braten", "roast meat"]] },
+    { id: "l3_getraenke", icon: "🥤", color: C.red, title: "Getränke: Drinks", sub: "From Kaffee to Sekt",
+        words: [["das Getränk", "drink"], ["der Kaffee", "coffee"], ["der Tee", "tea"], ["die Milch", "milk"], ["das Wasser", "water"], ["das Mineralwasser", "mineral water"], ["der Saft", "juice"], ["der Apfelsaft", "apple juice"], ["der Orangensaft", "orange juice"], ["der Mangosaft", "mango juice"], ["die Limonade", "lemonade"], ["die Cola", "cola"], ["das Bier", "beer"], ["der Wein", "wine"], ["der Rotwein", "red wine"], ["der Weißwein", "white wine"], ["der Sekt", "sparkling wine"], ["der Schnaps", "clear spirit"], ["der Alkohol", "alcohol"], ["die Erfrischungsgetränke", "soft drinks"], ["alkoholische Getränke", "alcoholic drinks"], ["der Glühwein", "mulled wine"]] },
+    { id: "l3_gerichte", icon: "🍲", color: C.ink, title: "Gerichte: Dishes", sub: "The Speisekarte", noType: true,
+        words: [["die Gemüsesuppe", "vegetable soup"], ["die Rindfleischsuppe", "beef soup"], ["die Hühnersuppe", "chicken soup"], ["die Zwiebelsuppe", "onion soup"], ["die Fischsuppe", "fish soup"], ["die Pilzsuppe", "mushroom soup"], ["die Fischplatte mit Toastbrot und Butter", "fish platter with toast and butter"], ["der Käseteller mit Weißbrot", "cheese plate with white bread"], ["die Schinkenplatte mit Schwarzbrot", "ham platter with brown bread"], ["der Schweinebraten mit Kartoffeln und Rotkohl", "roast pork with potatoes and red cabbage"], ["das Rindersteak mit Pommes frites und Bohnen", "beef steak with fries and beans"], ["die Bratwurst mit Kartoffelsalat", "fried sausage with potato salad"], ["das Kotelett mit Bratkartoffeln", "chop with fried potatoes"], ["das halbe Brathähnchen mit Reis und Gemüse", "half a roast chicken with rice and vegetables"], ["der Bratfisch mit Kartoffeln und Salat", "fried fish with potatoes and salad"], ["das Eis mit Sahne", "ice cream with cream"], ["das Eis mit Früchten und Sahne", "fruit ice cream with cream"], ["der Apfelkuchen", "apple cake"], ["der Obstkuchen", "fruitcake"], ["kalte Gerichte", "cold dishes"], ["warme Gerichte", "warm dishes"], ["die Vorspeise", "starter"], ["das Hauptgericht", "main course"], ["der Nachtisch / die Nachspeise", "dessert"]] },
+    { id: "l3_geschirr", icon: "🧺", color: C.green, title: "Küche & Mengen", sub: "Measures, packages & kitchen",
+        words: [["die Gabel", "fork"], ["das Messer", "knife"], ["der Löffel", "spoon"], ["der Teller", "plate"], ["die Tasse", "cup"], ["das Glas", "glass / jar"], ["die Flasche", "bottle"], ["die Dose", "tin / can"], ["die Packung", "package"], ["die Kiste", "crate / box"], ["der Kasten", "box crate"], ["die Schachtel", "small box"], ["das Päckchen", "small packet"], ["das Paket", "packet / parcel"], ["das Stück", "piece"], ["das Dutzend", "dozen"], ["das Pfund", "pound (half a kilo)"], ["das Kilo", "kilogram"], ["das Gramm", "gram"], ["der Liter", "litre"], ["der Halbliter", "half litre"], ["der Einkaufszettel", "shopping list"], ["der Preis", "price"], ["das Frühstück", "breakfast"], ["das Mittagessen", "lunch"], ["das Abendessen", "evening meal"], ["das Lieblingsessen", "favourite food"], ["das Lieblingsgetränk", "favourite drink"], ["das Lebensmittelgeschäft", "grocery / food shop"], ["der Marktplatz", "market place"], ["die Anzeige", "advertisement"], ["das Sonderangebot", "special offer"], ["das Waschmittel", "washing detergent"], ["das Spülmittel", "kitchen detergent"], ["die Wäsche", "laundry"], ["der Zettel", "piece of paper"], ["die Mark", "German currency (old)"], ["das Abendbrot", "supper / dinner"], ["der Termin", "appointment"], ["der Besuch", "visitors / visit"], ["das Bündel", "bundle"]] },
+    { id: "l3_adjektive", icon: "🌶️", color: C.gold, title: "Adjektive", sub: "salzig, süß, scharf…",
+        words: [["billig", "cheap"], ["bitter", "bitter"], ["dunkel", "dark"], ["eng", "narrow"], ["fett", "fatty"], ["frisch", "fresh"], ["hart", "hard"], ["hell", "light"], ["hoch", "tall / high"], ["kalt", "cold"], ["mild", "mild"], ["nah", "near"], ["salzig", "salty"], ["sauer", "sour"], ["scharf", "hot / spicy"], ["schlank", "slim"], ["süß", "sweet"], ["trocken", "dry"], ["typisch", "typical"], ["warm", "warm"], ["wichtig", "important"], ["fantastisch", "fantastic"], ["vorzüglich", "excellent"], ["ausgezeichnet", "excellent / very good"], ["fabelhaft", "marvellous"], ["prima", "great"], ["lecker", "delicious"], ["satt", "full (person)"], ["voll", "completely full"], ["zäh", "chewy / tough"], ["teuer", "expensive"], ["zu (süß / warm / scharf)", "too (sweet / warm / spicy)"]] },
+    { id: "l3_adverbien", icon: "⏱️", color: C.red, title: "Adverbien & mehr", sub: "immer, oft, nie…",
+        words: [["morgens", "in the mornings"], ["mittags", "at lunchtime"], ["nachmittags", "in the afternoons"], ["abends", "in the evenings"], ["am liebsten", "best / most of all"], ["besonders", "especially"], ["danach", "afterwards"], ["dann", "then"], ["fast", "almost"], ["ganz", "very / whole"], ["genug", "enough"], ["gern", "gladly (to like doing)"], ["lieber", "rather (to prefer)"], ["getrennt", "separately"], ["zusammen", "together"], ["meistens", "mostly"], ["immer", "always"], ["oft", "often"], ["manchmal", "sometimes"], ["selten", "rarely"], ["nie", "never"], ["natürlich", "naturally / of course"], ["nur", "only"], ["oben", "at the top"], ["unten", "at the bottom"], ["sofort", "at once"], ["überall", "everywhere"], ["verschieden", "different"], ["vor allem", "above all"], ["zuerst", "first"], ["insgesamt", "in total"], ["etwas", "a little"], ["jeder", "every"], ["pro", "per"], ["viel", "much / a lot"], ["als", "as / for"]] },
+    { id: "l3_konj", icon: "🔧", color: C.ink, title: "Konjugation: essen & Co.", sub: "du isst, er nimmt, ich mag…", special: "conj3",
+        words: [["essen", "to eat"], ["trinken", "to drink"], ["nehmen", "to take"], ["mögen", "to like"], ["brauchen", "to need"], ["bekommen", "to get"], ["bestellen", "to order"], ["bezahlen", "to pay"], ["kaufen", "to buy"], ["kochen", "to cook"], ["schmecken", "to taste"]] },
+    { id: "l3_akk", icon: "🎯", color: C.green, title: "Der Akkusativ", sub: "den, einen, keinen…", special: "akk",
+        akk: [["Ich esse ___ Salat.", "den", ["den", "die", "das"], "der Salat is masculine — der becomes den in the accusative"],
+            ["Ich esse ___ Steak.", "das", ["den", "die", "das"], "das Steak is neuter — das stays das"],
+            ["Ich esse ___ Kuchen.", "den", ["den", "die", "das"], "der Kuchen is masculine — der becomes den"],
+            ["Du isst ___ Hähnchen.", "das", ["den", "die", "das"], "das Hähnchen is neuter — das stays das"],
+            ["Er isst ___ Käse.", "den", ["den", "die", "das"], "der Käse is masculine — der becomes den"],
+            ["Sie essen ___ Frucht.", "die", ["den", "die", "das"], "die Frucht is feminine — die stays die"],
+            ["Ihr esst ___ Reis.", "den", ["den", "die", "das"], "der Reis is masculine — der becomes den"],
+            ["Du trinkst ___ Tee.", "den", ["den", "die", "das"], "der Tee is masculine — der becomes den"],
+            ["Sie trinken ___ Saft.", "den", ["den", "die", "das"], "der Saft is masculine — der becomes den"],
+            ["Wir trinken ___ Milch.", "die", ["den", "die", "das"], "die Milch is feminine — die stays die"],
+            ["Sie trinken ___ Rotwein.", "den", ["den", "die", "das"], "der Rotwein is masculine — der becomes den"],
+            ["Ich nehme ___ Gemüsesuppe.", "eine", ["einen", "eine", "ein"], "die Suppe is feminine — eine stays eine"],
+            ["Ich nehme ___ Apfelkuchen.", "einen", ["einen", "eine", "ein"], "der Kuchen is masculine — ein becomes einen"],
+            ["Ich nehme ___ Kotelett.", "ein", ["einen", "eine", "ein"], "das Kotelett is neuter — ein stays ein"],
+            ["Ich trinke ___ Apfelsaft.", "einen", ["einen", "eine", "ein"], "der Saft is masculine — ein becomes einen"],
+            ["Ich trinke ___ Tasse Kaffee.", "eine", ["einen", "eine", "ein"], "die Tasse is feminine — eine stays eine"],
+            ["Er trinkt ___ Glas Bier.", "ein", ["einen", "eine", "ein"], "das Glas is neuter — ein stays ein"],
+            ["Ich mag ___ Reis.", "keinen", ["keinen", "keine", "kein"], "der Reis is masculine — kein becomes keinen"],
+            ["Ich mag ___ Cola.", "keine", ["keinen", "keine", "kein"], "die Cola is feminine — keine stays keine"],
+            ["Ich mag ___ Brot.", "kein", ["keinen", "keine", "kein"], "das Brot is neuter — kein stays kein"],
+            ["Ich mag ___ Fisch, aber Steak esse ich gern.", "keinen", ["keinen", "keine", "kein"], "der Fisch is masculine — kein becomes keinen"],
+            ["Ich esse ___ Eis.", "das", ["den", "die", "das"], "das Eis is neuter — das stays das"], ["Nein, ich bekomme ___ Tee.", "den", ["den", "die", "das"], "der Tee is masculine — der becomes den"], ["Ich bekomme ___ Fischplatte.", "die", ["den", "die", "das"], "die Fischplatte is feminine — die stays die"], ["Nein danke, ___ Kuchen, lieber ein Eis.", "keinen", ["keinen", "keine", "kein"], "der Kuchen is masculine — kein becomes keinen"], ["Wir haben ___ Wein mehr.", "keinen", ["keinen", "keine", "kein"], "der Wein is masculine — kein becomes keinen"], ["Ich trinke doch ___ Alkohol.", "keinen", ["keinen", "keine", "kein"], "der Alkohol is masculine — kein becomes keinen"]],
+        words: [["der → den", "masculine article in the accusative"], ["die → die", "feminine stays the same"], ["das → das", "neuter stays the same"], ["ein → einen (masc.)", "'a' for masculine objects"], ["kein → keinen (masc.)", "'no/not a' for masculine objects"]] },
+    { id: "l3_gern", icon: "💚", color: C.gold, title: "Gern, lieber, am liebsten", sub: "What do you like?", noType: true,
+        words: [["Was essen Sie gern?", "What do you like eating?"], ["Ich esse gern Reis", "I like eating rice"], ["Essen Sie gern Fleisch?", "Do you like eating meat?"], ["Ja, gern", "Yes, gladly"], ["Nein, nicht gern", "No, not really"], ["Isst du gern Käse?", "Do you like eating cheese?"], ["Was trinken Sie gern?", "What do you like drinking?"], ["Ich trinke gern Wasser", "I like drinking water"], ["Ich mag kein Bier", "I don't like beer"], ["Ich trinke lieber Wein", "I prefer drinking wine"], ["Essen Sie gerne Kartoffeln oder Reis?", "Do you like potatoes or rice?"], ["Ich esse lieber Reis", "I prefer eating rice"], ["Trinken Sie gern Kaffee oder Tee?", "Do you like coffee or tea?"], ["Ich trinke lieber Tee", "I prefer drinking tea"], ["Was essen Sie am liebsten?", "What do you like eating most of all?"], ["Am liebsten esse ich Pilau", "Most of all I eat pilau"], ["Was trinken Sie am liebsten?", "What do you like drinking most?"], ["Am liebsten trinke ich Wasser", "Most of all I drink water"], ["Ich esse meistens Salat", "I mostly eat salad"], ["Ich esse nie Fisch", "I never eat fish"], ["Ich esse manchmal Fleisch", "I sometimes eat meat"], ["Ich esse sehr selten Kuchen", "I very rarely eat cake"], ["Ich trinke immer Mineralwasser", "I always drink mineral water"], ["Ich trinke sehr oft Saft", "I very often drink juice"], ["Ich mag keinen Fisch, aber Steak esse ich gern", "I don't like fish, but I gladly eat steak"], ["Was ist Ihr Lieblingsessen?", "What is your favourite food?"], ["Mein Lieblingsessen ist Fisch mit Ugali", "My favourite food is fish with ugali"], ["Was ist dein Lieblingsgetränk?", "What is your favourite drink?"], ["Mein Lieblingsgetränk ist Wein", "My favourite drink is wine"], ["Morgens esse ich ein Brötchen", "In the mornings I eat a bread roll — verb stays 2nd!"]] },
+    { id: "l3_einladung", icon: "🎉", color: C.gold, title: "Einladung & Guten Appetit", sub: "Invite, toast & feast", noType: true,
+        words: [["die Einladung", "invitation"], ["Ich lade dich zum Frühstück ein", "I am inviting you for breakfast"], ["Kann ich dich zum Frühstück einladen?", "Can I invite you for breakfast?"], ["Darf ich dich zum Mittagessen einladen?", "May I invite you for lunch?"], ["Ich lade dich zum Abendessen ein", "I am inviting you for dinner"], ["Ich lade dich zu meiner Geburtstagsparty ein", "I am inviting you to my birthday party"], ["die Hochzeitsparty", "wedding party"], ["die Abschiedsparty", "farewell party"], ["die Feier", "celebration / party"], ["Ja, ich komme gern", "Yes, I will gladly come"], ["Ich möchte gern kommen, aber ich habe Besuch", "I would like to come, but I have visitors"], ["Ich möchte gern kommen, aber ich bin beschäftigt", "I would like to come, but I am busy"], ["Ich habe einen anderen Termin", "I have another appointment"], ["Ich würde gern kommen, aber ich fühle mich nicht wohl", "I would like to come, but I am not feeling well"], ["den Tisch decken", "to set the table"], ["Ich decke den Tisch", "I am setting the table"], ["die Mahlzeit", "mealtime"], ["Guten Appetit!", "Enjoy your meal!"], ["Lass es dir schmecken!", "Enjoy your meal! (informal)"], ["Danke, gleichfalls", "Thanks, same to you"], ["Danke, ebenfalls", "Thanks, likewise"], ["Zum Wohl! / Prost!", "Cheers!"], ["Nehmen Sie doch noch etwas Fisch!", "Do have some more fish!"], ["Nimm doch noch etwas Fisch!", "Have some more fish! (informal)"], ["Noch etwas Wasser?", "Some more water?"], ["Möchten Sie noch mehr?", "Would you like more?"], ["Ja, gern", "Yes, gladly"], ["Nein danke, ich bin satt", "No thanks, I am full"], ["Danke, ich habe genug", "Thanks, I have enough"], ["Ich möchte nicht mehr", "I do not want any more"], ["Ich bin ganz voll", "I am completely full"], ["Ich brauche nichts", "I do not need anything"], ["Wie war das Essen?", "How was the food?"], ["Das Essen war lecker", "The food was delicious"], ["Das Essen war vorzüglich", "The food was excellent"], ["Hat es Ihnen gut geschmeckt?", "Did it taste good?"], ["Es hat nicht gut geschmeckt", "It did not taste good"], ["Das Brot war zu hart", "The bread was too hard"], ["Das Fleisch war zäh", "The meat was chewy"], ["Die Suppe war zu salzig", "The soup was too salty"], ["Die Soße war zu scharf", "The sauce was too spicy"], ["Die Limonade war zu warm", "The lemonade was too warm"], ["Der Wein ist zu trocken", "The wine is too dry"], ["Er ist sehr süß, aber er schmeckt gut", "It is very sweet, but it tastes good"], ["Das Steak ist teuer, aber es schmeckt gut", "The steak is expensive, but it tastes good"], ["die Absage", "refusal / cancellation"]] },
+    { id: "l3_restaurant", icon: "🍽️", color: C.red, title: "Im Restaurant", sub: "Order like a local", noType: true,
+        words: [["Gibt es hier ein schönes Restaurant?", "Is there a nice restaurant here?"], ["Ja, hier gibt's eins", "Yes, there's one here"], ["Nein, hier gibt's keins", "No, there's none here"], ["Nehmen Sie bitte Platz!", "Please take a seat!"], ["Setzen Sie sich bitte!", "Please sit down!"], ["Einen Augenblick, bitte", "One moment, please"], ["Kann ich bitte die Speisekarte haben?", "May I have the menu, please?"], ["Ja, sofort", "Yes, right away"], ["Wir möchten gern bestellen", "We would like to order"], ["Was bekommen Sie?", "What will you have?"], ["Ich nehme eine Gemüsesuppe", "I'll take a vegetable soup"], ["Und was möchten Sie trinken?", "And what would you like to drink?"], ["Ein Glas Weißwein, bitte", "A glass of white wine, please"], ["Aber keine Pommes frites, ich möchte lieber Bratkartoffeln", "But no fries, I'd rather have fried potatoes"], ["Geht das?", "Is that possible?"], ["Ja, natürlich / freilich", "Yes, of course"], ["Ist das möglich?", "Is that possible? (formal)"], ["Nein, das haben wir nicht mehr", "No, we are out of that"], ["Noch irgendwas?", "Anything else?"], ["Nein, ich brauche nichts", "No, I don't need anything"], ["Wir möchten bitte bezahlen", "We would like to pay, please"], ["Zusammen oder getrennt?", "Together or separately?"], ["Getrennt, bitte", "Separately, please"], ["Das macht 16 Euro 25", "That comes to 16 euros 25"], ["Stimmt so!", "Keep the change!"], ["Behalten Sie das Restgeld", "Keep the change"], ["das Trinkgeld", "the tip"], ["Ich möchte bitte die Rechnung", "I would like the bill, please"], ["Denn ich habe es eilig", "Because I'm in a hurry"], ["die Rechnung", "the bill"], ["der Beleg", "the receipt"], ["An der Kasse", "At the cashier"], ["Schmeckt der Fisch?", "Is the fish good?"], ["Danke, er schmeckt sehr gut", "Thanks, it tastes very good"], ["Schmeckt die Suppe?", "Is the soup good?"], ["Danke, sie schmeckt vorzüglich", "Thanks, it tastes excellent"], ["Danke, es schmeckt fabelhaft", "Thanks, it tastes marvellous"], ["die Getränkekarte", "the drinks menu"], ["Vielen Dank!", "Thank you very much!"], ["der Gast", "the guest"], ["Herr Ober!", "Waiter! (calling)"], ["Herr Ober, wir möchten bestellen!", "Waiter, we would like to order!"], ["Der Kellner bringt die Getränke", "The waiter brings the drinks"], ["Die Gäste bestellen die Getränke", "The guests order the drinks"], ["Wie viel macht das?", "How much does that come to?"], ["Was gibt es zum Abendbrot?", "What is for dinner?"], ["Ist das Rindfleisch?", "Is that beef?"], ["Nein, Schweinefleisch", "No, pork"]] },
+    { id: "l3_einkaufen", icon: "🛒", color: C.ink, title: "Einkaufen & Preise", sub: "Shopping & prices", special: "preis",
+        prices: [[1, 11], [4, 95], [2, 48], [7, 98], [4, 68], [16, 25], [11, 90], [10, 70], [14, 20], [3, 75]],
+        cents: [68, 73, 78, 88, 95, 29],
+        words: [["Was kostet…?", "How much is…?"], ["Wie viel kostet…?", "How much does it cost?"], ["Was kosten…?", "How much are they?"], ["Ein Kilo Kartoffeln kostet 2 Euro", "A kilo of potatoes costs 2 euros"], ["Was kostet eine Flasche Apfelsaft?", "How much is a bottle of apple juice?"], ["Ich kaufe 500 Gramm Butter", "I'm buying 500 grams of butter"], ["Ich brauche ein Kilo Rindersteak", "I need a kilo of beef steak"], ["Ich nehme eine Packung Mehl", "I'll take a packet of flour"], ["Man kann auf dem Marktplatz Tomaten und Zwiebeln kaufen", "You can buy tomatoes and onions at the market"], ["Lesen Sie die Anzeige", "Read the advertisement"], ["die Sonderangebote", "the special offers"], ["Hier kaufe ich gern", "I like shopping here"], ["eine Flasche Spülmittel", "a bottle of dish detergent"], ["ein Glas Marmelade", "a jar of jam"], ["eine Kiste Bier", "a crate of beer"], ["fünf Stück Eier", "five eggs"], ["zwei Liter Mineralwasser", "two litres of mineral water"], ["Fl. = die Flasche", "Fl. = bottle (abbreviation)"], ["Pckg. = die Packung", "Pckg. = package (abbreviation)"], ["St. = das Stück", "St. = piece (abbreviation)"], ["kg = das Kilogramm", "kg = kilogram (abbreviation)"]] },
+];
+const L3_SECTIONS = [
+    { name: "Wortschatz · Food & Drink", ids: ["l3_verbs", "l3_essen", "l3_getraenke", "l3_gerichte"] },
+    { name: "Wortschatz · Shopping & Kitchen", ids: ["l3_geschirr", "l3_adjektive", "l3_adverbien"] },
+    { name: "Grammatik · Grammar", ids: ["l3_konj", "l3_akk"] },
+    { name: "Sprechen · Conversation", ids: ["l3_gern", "l3_einladung", "l3_restaurant", "l3_einkaufen"] },
+];
+/* ---------- LEKTION 4 (Freizeit & Uhrzeit: trennbare Verben, Modalverben, Uhrzeit, Tagesablauf) ---------- */
+const SEP_L4 = {
+    aufstehen: { pre: "auf", en: "to get up", ich: "stehe", du: "stehst", "er/sie/es": "steht", wir: "stehen", ihr: "steht", "Sie/sie": "stehen" },
+    anfangen: { pre: "an", en: "to start / begin", ich: "fange", du: "fängst", "er/sie/es": "fängt", wir: "fangen", ihr: "fangt", "Sie/sie": "fangen" },
+    vorbereiten: { pre: "vor", en: "to prepare", ich: "bereite", du: "bereitest", "er/sie/es": "bereitet", wir: "bereiten", ihr: "bereitet", "Sie/sie": "bereiten" },
+    ankommen: { pre: "an", en: "to arrive", ich: "komme", du: "kommst", "er/sie/es": "kommt", wir: "kommen", ihr: "kommt", "Sie/sie": "kommen" },
+    abfahren: { pre: "ab", en: "to depart", ich: "fahre", du: "fährst", "er/sie/es": "fährt", wir: "fahren", ihr: "fahrt", "Sie/sie": "fahren" },
+    mitkommen: { pre: "mit", en: "to come along", ich: "komme", du: "kommst", "er/sie/es": "kommt", wir: "kommen", ihr: "kommt", "Sie/sie": "kommen" },
+    einkaufen: { pre: "ein", en: "to shop", ich: "kaufe", du: "kaufst", "er/sie/es": "kauft", wir: "kaufen", ihr: "kauft", "Sie/sie": "kaufen" },
+    fernsehen: { pre: "fern", en: "to watch TV", ich: "sehe", du: "siehst", "er/sie/es": "sieht", wir: "sehen", ihr: "seht", "Sie/sie": "sehen" },
+    "aufräumen": { pre: "auf", en: "to tidy up", ich: "räume", du: "räumst", "er/sie/es": "räumt", wir: "räumen", ihr: "räumt", "Sie/sie": "räumen" },
+};
+const VOK_L4 = {
+    sehen: { ich: "sehe", du: "siehst", "er/sie/es": "sieht", wir: "sehen", ihr: "seht", "Sie/sie": "sehen" },
+    schlafen: { ich: "schlafe", du: "schläfst", "er/sie/es": "schläft", wir: "schlafen", ihr: "schlaft", "Sie/sie": "schlafen" },
+    geben: { ich: "gebe", du: "gibst", "er/sie/es": "gibt", wir: "geben", ihr: "gebt", "Sie/sie": "geben" },
+    lesen: { ich: "lese", du: "liest", "er/sie/es": "liest", wir: "lesen", ihr: "lest", "Sie/sie": "lesen" },
+    treffen: { ich: "treffe", du: "triffst", "er/sie/es": "trifft", wir: "treffen", ihr: "trefft", "Sie/sie": "treffen" },
+    vergessen: { ich: "vergesse", du: "vergisst", "er/sie/es": "vergisst", wir: "vergessen", ihr: "vergesst", "Sie/sie": "vergessen" },
+    waschen: { ich: "wasche", du: "wäschst", "er/sie/es": "wäscht", wir: "waschen", ihr: "wascht", "Sie/sie": "waschen" },
+    fahren: { ich: "fahre", du: "fährst", "er/sie/es": "fährt", wir: "fahren", ihr: "fahrt", "Sie/sie": "fahren" },
+};
+const AUX_L4 = {
+    wissen: { ich: "weiß", du: "weißt", "er/sie/es": "weiß", wir: "wissen", ihr: "wisst", "Sie/sie": "wissen" },
+    "mögen": { ich: "mag", du: "magst", "er/sie/es": "mag", wir: "mögen", ihr: "mögt", "Sie/sie": "mögen" },
+    werden: { ich: "werde", du: "wirst", "er/sie/es": "wird", wir: "werden", ihr: "werdet", "Sie/sie": "werden" },
+    tun: { ich: "tue", du: "tust", "er/sie/es": "tut", wir: "tun", ihr: "tut", "Sie/sie": "tun" },
+    sein: { ich: "bin", du: "bist", "er/sie/es": "ist", wir: "sind", ihr: "seid", "Sie/sie": "sind" },
+    haben: { ich: "habe", du: "hast", "er/sie/es": "hat", wir: "haben", ihr: "habt", "Sie/sie": "haben" },
+};
+const MODAL_L4 = {
+    "müssen": { ich: "muss", du: "musst", "er/sie/es": "muss", wir: "müssen", ihr: "müsst", "Sie/sie": "müssen" },
+    "dürfen": { ich: "darf", du: "darfst", "er/sie/es": "darf", wir: "dürfen", ihr: "dürft", "Sie/sie": "dürfen" },
+    "möchten": { ich: "möchte", du: "möchtest", "er/sie/es": "möchte", wir: "möchten", ihr: "möchtet", "Sie/sie": "möchten" },
+    "können": { ich: "kann", du: "kannst", "er/sie/es": "kann", wir: "können", ihr: "könnt", "Sie/sie": "können" },
+    wollen: { ich: "will", du: "willst", "er/sie/es": "will", wir: "wollen", ihr: "wollt", "Sie/sie": "wollen" },
+    sollen: { ich: "soll", du: "sollst", "er/sie/es": "soll", wir: "sollen", ihr: "sollt", "Sie/sie": "sollen" },
+};
+const MODAL_EN = { "müssen": "must / to have to", "dürfen": "may / to be allowed to", "möchten": "would like", "können": "can / to be able to", wollen: "to want", sollen: "should / shall" };
+/* Clock time engine: German colloquial time (halb looks FORWARD!) */
+const HW12 = ["zwölf", "eins", "zwei", "drei", "vier", "fünf", "sechs", "sieben", "acht", "neun", "zehn", "elf"];
+const hw = (h) => HW12[h % 12];
+const timeDe = (h, m) => {
+    const nx = hw(h + 1);
+    if (m === 0)
+        return "Punkt " + hw(h);
+    if (m === 5)
+        return "fünf nach " + hw(h);
+    if (m === 10)
+        return "zehn nach " + hw(h);
+    if (m === 15)
+        return "Viertel nach " + hw(h);
+    if (m === 20)
+        return "zehn vor halb " + nx;
+    if (m === 25)
+        return "fünf vor halb " + nx;
+    if (m === 30)
+        return "halb " + nx;
+    if (m === 35)
+        return "fünf nach halb " + nx;
+    if (m === 40)
+        return "zehn nach halb " + nx;
+    if (m === 45)
+        return "Viertel vor " + nx;
+    if (m === 50)
+        return "zehn vor " + nx;
+    return "fünf vor " + nx; // m === 55
+};
+const timeWhy = (h, m) => {
+    const nx = hw(h + 1), nxN = (h % 12) + 1;
+    if (m === 0)
+        return h + ":00 is exactly on the hour — Punkt / genau / gleich " + hw(h) + ".";
+    if (m === 30)
+        return "German „halb“ looks FORWARD to the next hour: halb " + nx + " = halfway TO " + nxN + " = " + h + ":30!";
+    if (m === 15)
+        return "Viertel nach " + hw(h) + " = a quarter PAST " + (h % 12 || 12) + ".";
+    if (m === 45)
+        return "Viertel vor " + nx + " = a quarter TO the NEXT hour (" + nxN + ").";
+    if (m === 20 || m === 25)
+        return "Close to the half: count BACK from halb " + nx + " — " + (30 - m) + " minutes before it.";
+    if (m === 35 || m === 40)
+        return "Past the half: count FORWARD from halb " + nx + " — " + (m - 30) + " minutes after it.";
+    if (m < 30)
+        return m + " minutes past → " + (m === 5 ? "fünf" : "zehn") + " nach " + hw(h) + ".";
+    return (60 - m) + " minutes to the next hour → " + (60 - m === 5 ? "fünf" : "zehn") + " vor " + nx + ".";
+};
+const L4_UNITS = [
+    { id: "l4_verbs", icon: "🏄", color: C.green, title: "Wortschatz: Verben", sub: "Lektion 4 verbs",
+        words: [["anfangen", "to start / begin"], ["anziehen", "to put on (clothes)"], ["aufhören", "to stop (doing something)"], ["aufmachen", "to open"], ["aufräumen", "to tidy up"], ["aufstehen", "to get up"], ["bedienen", "to wait on / serve"], ["beschreiben", "to describe"], ["besuchen", "to visit"], ["bringen", "to bring"], ["dürfen", "to be allowed to"], ["duschen", "to have a shower"], ["einkaufen", "to shop"], ["einladen", "to invite"], ["faulenzen", "to laze about"], ["feiern", "to celebrate"], ["fernsehen", "to watch TV"], ["fotografieren", "to take photos"], ["frühstücken", "to have breakfast"], ["holen", "to get / fetch"], ["kontrollieren", "to check"], ["können", "can / to be able to"], ["messen", "to measure"], ["mitbringen", "to bring along"], ["mitkommen", "to come along"], ["müssen", "must / to have to"], ["ordnen", "to arrange"], ["Rad fahren", "to cycle"], ["rauchen", "to smoke"], ["schlafen", "to sleep"], ["schneiden", "to cut"], ["schwimmen", "to swim"], ["sehen", "to see"], ["spazieren gehen", "to go for a walk"], ["stattfinden", "to take place"], ["stören", "to disturb"], ["tanzen", "to dance"], ["tauschen", "to change / exchange"], ["treffen", "to meet"], ["vergessen", "to forget"], ["vergleichen", "to compare"], ["vorbereiten", "to prepare"], ["vorhaben", "to have something planned"], ["zeichnen", "to draw"], ["zuhören", "to listen to"]] },
+    { id: "l4_nouns", icon: "🎬", color: C.gold, title: "Wortschatz: Nomen", sub: "Freizeit nouns",
+        words: [["der Abend", "evening"], ["die Ansichtskarte", "picture postcard"], ["die Arbeit", "work"], ["der Ausflug", "outing"], ["der Bäcker", "baker"], ["die Bank", "bank"], ["die Bar", "bar"], ["die Bibliothek", "library"], ["das Buch", "book"], ["das Café", "cafe"], ["die Diskothek", "disco"], ["die Dusche", "shower"], ["der Eintritt", "entry"], ["das Essen", "meal"], ["das Fernsehen", "television"], ["das Fieber", "fever / temperature"], ["der Film", "film"], ["die Freizeit", "leisure time"], ["der Frisör", "male hairdresser"], ["die Frisörin", "female hairdresser"], ["der Gast", "guest"], ["der Gruß", "greeting"], ["der Juli", "July"], ["der Kellner", "waiter"], ["die Kellnerin", "waitress"], ["das Kino", "cinema"], ["das Kleid", "dress"], ["das Konzert", "concert"], ["das Krankenhaus", "hospital"], ["die Krankenschwester", "female nurse"], ["der Lehrer", "male teacher"], ["die Lehrerin", "female teacher"], ["die Mannschaft", "team"], ["die Maschine", "machine / engine"], ["das Meer", "sea"], ["der Mensch", "human being"], ["der Mittag", "midday"], ["das Mittagessen", "lunch / midday meal"], ["die Musik", "music"], ["der Passagier", "passenger"], ["die Pause", "break"], ["das Restaurant", "restaurant"], ["der Satz", "sentence"], ["das Schild", "sign"], ["das Schwimmbad", "swimming pool"], ["die Situation", "situation"], ["der Spaziergang", "walk"], ["der Tanz", "dance"], ["die Torte", "gateau / cake"], ["die Uhrzeit", "time (of day)"], ["der Verband", "bandage"], ["das Viertel", "quarter"], ["der Vortrag", "talk / speech"], ["die Wohnung", "flat / apartment"], ["die Zeitung", "newspaper"], ["die Zigarette", "cigarette"], ["der Montag", "Monday"], ["der Mittwoch", "Wednesday"], ["der Donnerstag", "Thursday"], ["der Freitag", "Friday"], ["der Samstag", "Saturday"], ["der Sonnabend", "Saturday (other name)"], ["der Sonntag", "Sunday"]] },
+    { id: "l4_adjadv", icon: "🌤️", color: C.red, title: "Adjektive & mehr", sub: "geöffnet, verboten, vielleicht…",
+        words: [["geöffnet", "open"], ["geschlossen", "closed"], ["herrlich", "wonderful / great"], ["leise", "quiet"], ["nächst", "next"], ["nett", "nice"], ["obligatorisch", "obligatory"], ["spät", "late"], ["verboten", "forbidden"], ["heute", "today"], ["immer", "always"], ["meistens", "mostly"], ["morgen", "tomorrow"], ["nie", "never"], ["vielleicht", "perhaps"], ["auf", "on"], ["bis", "until"], ["gegen", "against / around (time)"], ["jemand", "someone"], ["nach", "to / after"], ["von … bis", "from … until"], ["wann?", "when?"], ["warum?", "why?"], ["wie lange", "how long"], ["zwischen", "between"]] },
+    { id: "l4_ausdruecke", icon: "💌", color: C.ink, title: "Ausdrücke", sub: "Achtung! Bis dann!", noType: true,
+        words: [["Achtung!", "Careful! / Attention!"], ["Betten machen", "to make the beds"], ["das nächste Mal", "next time"], ["ein Sonnenbad nehmen", "to sunbathe"], ["frei haben", "to have time off"], ["Herzliche Grüße", "kindest regards"], ["Tut mir leid", "I'm sorry"], ["lieber / liebe / liebes", "dear"], ["Lust haben", "to feel like / to want to"], ["morgen früh", "tomorrow morning"], ["Pause machen", "to take a break"], ["Schön!", "all right!"], ["Tschüs!", "see you!"], ["In Ordnung", "in order / OK"], ["Bis dann!", "till then!"], ["Wir treffen uns", "let's meet"], ["Darf ich mitkommen?", "May I come with you?"], ["Schade!", "what a pity!"], ["Vielleicht das nächste Mal", "maybe next time"], ["Was ist heute los?", "what's happening today?"], ["Die Bibliothek ist geschlossen", "the library is closed"], ["Wie lange ist die Bar geöffnet?", "how long is the bar open?"], ["Die Bar ist bis ein Uhr geöffnet", "the bar is open until one o'clock"]] },
+    { id: "l4_trennbar", icon: "✂️", color: C.green, title: "Trennbare Verben", sub: "The prefix flies to the end!", special: "sep4",
+        words: [["aufstehen", "to get up"], ["anfangen", "to start / begin"], ["vorbereiten", "to prepare"], ["ankommen", "to arrive"], ["abfahren", "to depart"], ["mitkommen", "to come along"], ["einkaufen", "to shop"], ["fernsehen", "to watch TV"], ["aufräumen", "to tidy up"], ["die Ankunft", "arrival"], ["die Abfahrt", "departure"], ["der Anfang", "beginning"], ["Ich stehe immer um 6:00 Uhr auf", "I always get up at 6:00"], ["Wann fängt die Prüfung an?", "When does the exam start?"], ["Wann kommt der Zug in Nairobi an?", "When does the train arrive in Nairobi?"], ["Um 8:00 Uhr fährt der Zug ab", "The train departs at 8:00"], ["Kannst du bitte das Mittagessen vorbereiten?", "Can you please prepare lunch?"]] },
+    { id: "l4_vokal", icon: "🔀", color: C.gold, title: "Vokalwechsel Verben", sub: "du schläfst, er liest…", special: "vokal4",
+        words: [["sehen", "to see"], ["schlafen", "to sleep"], ["geben", "to give"], ["lesen", "to read"], ["treffen", "to meet"], ["vergessen", "to forget"], ["waschen", "to wash"], ["fahren", "to drive / travel"]] },
+    { id: "l4_aux", icon: "🧠", color: C.red, title: "Hilfsverben", sub: "wissen, mögen, werden, tun", special: "aux4",
+        words: [["wissen", "to know"], ["mögen", "to like"], ["werden", "to become / will"], ["tun", "to do / make / put"], ["Ich weiß nicht", "I don't know"], ["Weißt du, wo Erick ist?", "Do you know where Erick is?"], ["Du wirst Ärztin", "You will become a doctor"], ["Er wird bald sehr reich", "He will soon be very rich"], ["Ich mag nichts", "I like nothing"], ["Ich tue eine Aufgabe", "I'm doing a task"]] },
+    { id: "l4_modal", icon: "🦾", color: C.ink, title: "Modalverben", sub: "muss, darf, kann, will…", special: "modal4",
+        words: [["müssen", "must / to have to"], ["dürfen", "may / to be allowed to"], ["möchten", "would like"], ["können", "can / to be able to"], ["wollen", "to want"], ["sollen", "should / shall"], ["Möchten ist höflicher als wollen", "möchten is more polite than wollen"]] },
+    { id: "l4_satz", icon: "🧩", color: C.green, title: "Satzbau: Modalverben", sub: "The action verb goes LAST!", noType: true, special: "satz4",
+        satz: [["Ich kann nicht verstehen", "Ich kann verstehe nicht", "I cannot understand"],
+            ["Du musst jetzt schlafen", "Du musst schlafen jetzt", "You must sleep now"],
+            ["Wir möchten eine Schokolade essen", "Wir möchten essen eine Schokolade", "We would like to eat a chocolate"],
+            ["Er will Deutsch lernen", "Er will lernen Deutsch", "He wants to learn German"],
+            ["Ich soll zum Arzt gehen", "Ich soll gehen zum Arzt", "I should go to the doctor"],
+            ["Du darfst hier nicht rauchen", "Du darfst rauchen hier nicht", "You are not allowed to smoke here"],
+            ["Ich kann nicht ins Kino gehen", "Ich kann gehen nicht ins Kino", "I can't go to the cinema"],
+            ["Ich will Medizin studieren", "Ich will studieren Medizin", "I want to study medicine"],
+            ["Er möchte nach Nairobi fahren", "Er möchte fahren nach Nairobi", "He would like to travel to Nairobi"],
+            ["Sie muss das Abendessen kochen", "Sie muss kochen das Abendessen", "She must cook the dinner"]],
+        words: [["Das Modalverb steht auf Position 2", "the modal verb takes position 2"], ["Das Aktionsverb geht ans Ende", "the action verb goes to the end (infinitive)"]] },
+    { id: "l4_uhrzeit", icon: "🕰️", color: C.gold, title: "Die Uhrzeit", sub: "halb acht = 7:30!", special: "uhr4",
+        words: [["Wie spät ist es?", "What is the time?"], ["Wie viel Uhr ist es?", "What time is it?"], ["Punkt / genau / gleich", "exactly / on the dot"], ["kurz nach", "shortly past"], ["kurz vor", "shortly to"], ["nach", "past"], ["vor", "to (before the hour)"], ["halb", "half (to the NEXT hour!)"], ["Viertel", "quarter (15 min)"]] },
+    { id: "l4_tag", icon: "🌅", color: C.red, title: "Der Tagesablauf", sub: "Daily routine", noType: true,
+        words: [["Wann stehst du auf?", "When do you get up?"], ["Ich stehe um sechs Uhr auf", "I get up at six o'clock"], ["Wann frühstückst du?", "When do you have breakfast?"], ["Ich frühstücke um 7:00 Uhr", "I have breakfast at 7:00"], ["Wann gehst du zur Schule?", "When do you go to school?"], ["Ich gehe zur Schule um 8:00 Uhr", "I go to school at 8:00"], ["zum (der/das Orte)", "to the (for der & das places)"], ["zur (die Orte)", "to the (for die places)"], ["Wann isst du zu Mittag?", "When do you eat lunch?"], ["Ich esse zu Mittag um 1:00 Uhr", "I eat lunch at 1:00"], ["Wann isst du zu Abend?", "When do you eat dinner?"], ["Wann gehst du ins Bett?", "When do you go to bed?"], ["Ich gehe ins Bett um 11:00 Uhr", "I go to bed at 11:00"], ["Um sieben Uhr frühstückt mein Vater", "At seven my father has breakfast"], ["Da schläft meine Schwester noch", "At that time my sister is still sleeping"], ["Da räumt meine Mutter die Wohnung auf", "At that time my mother tidies the flat"], ["Was machst du zwischen ein Uhr und zwei Uhr?", "What do you do between one and two?"], ["Was machst du gegen zwei Uhr?", "What do you do around two o'clock?"], ["Wann fängt die Gymnastik an?", "When does the gymnastics start?"], ["Um Viertel vor acht", "At a quarter to eight"], ["Wann findet der Fotokurs statt?", "When does the photo course take place?"], ["Um halb zehn frühstückt Ilona", "At half past nine Ilona has breakfast"], ["Um drei nimmt Ilona ein Sonnenbad", "At three Ilona sunbathes"], ["Monika misst Fieber um halb zehn", "Monika measures temperature at 9:30"], ["Willi bereitet um acht Uhr das Frühstück vor", "Willi prepares breakfast at eight"]] },
+    { id: "l4_bord", icon: "🛳️", color: C.ink, title: "Willkommen an Bord!", sub: "kann, muss oder darf?", noType: true,
+        words: [["Willkommen an Bord!", "Welcome on board!"], ["Wo kann man einen Film sehen?", "Where can you watch a film?"], ["Auf Deck zehn", "On deck ten"], ["Wo kann man Musik hören?", "Where can you listen to music?"], ["Wo kann man Geld tauschen?", "Where can you exchange money?"], ["Wo kann man einen Spaziergang machen?", "Where can you go for a walk?"], ["Hier kann man ein Bier trinken", "Here you can drink a beer"], ["Hier muss man bezahlen", "Here you must pay"], ["Hier muss man vor dem Schwimmen duschen", "Here you must shower before swimming"], ["Hier darf man keine Getränke mitbringen", "Here you may not bring drinks"], ["Hier darf man nicht schlafen", "Here you may not sleep"], ["Hier darf man nicht stören", "Here you may not disturb"], ["Hier muss man warten", "Here you must wait"], ["Hier darf man nicht eintreten", "Here you may not enter"], ["Wo bedient ein Kellner einen Gast?", "Where does a waiter serve a guest?"], ["Wo backt ein Bäcker eine Torte?", "Where does a baker bake a gateau?"], ["Wo kontrolliert ein Mechaniker die Maschine?", "Where does a mechanic check the engine?"], ["kann = can", "possibility / ability"], ["muss = must", "obligation"], ["darf = may", "permission"]] },
+    { id: "l4_plaene", icon: "🎉", color: C.gold, title: "Vorhaben & Mitkommen", sub: "Plans & invitations", noType: true,
+        words: [["Was hast du heute vor?", "What are your plans today?"], ["vorhaben", "to have plans"], ["Was hast du heute Abend vor?", "What are your plans this evening?"], ["Ich möchte tanzen gehen", "I would like to go dancing"], ["Ich möchte meine Freunde besuchen", "I would like to visit my friends"], ["Ich möchte meine Wäsche waschen", "I would like to wash my laundry"], ["Ich möchte einen Film sehen", "I would like to watch a film"], ["Ich möchte mein Zimmer aufräumen", "I would like to tidy my room"], ["Hast du heute Abend schon was vor?", "Do you already have plans this evening?"], ["Ja, ich möchte ins Kino gehen", "Yes, I'd like to go to the cinema"], ["Nein, ich weiß noch nicht", "No, I don't know yet"], ["Kommst du mit?", "Are you coming along?"], ["Ja, gern", "Yes, gladly"], ["Nein, ich habe keine Zeit", "No, I have no time"], ["Nein, ich habe keine Lust", "No, I don't feel like it"], ["Möchtest du mitkommen?", "Would you like to come along?"], ["Wann fängt das denn an?", "When does it start then?"], ["Um Viertel vor zehn Uhr", "At a quarter to ten"], ["Dann treffen wir uns um zehn Uhr", "Then let's meet at ten"], ["Ich kaufe dir ein Bier", "I'll buy you a beer"], ["Um 23:00 Uhr kann man in die Diskothek gehen", "At 23:00 you can go to the disco"], ["Um 19:30 Uhr kann man den Film sehen", "At 19:30 you can watch the film"], ["Na gut, dann tschüs!", "Well all right, bye then!"]] },
+];
+const L4_SECTIONS = [
+    { name: "Wortschatz · Vocabulary", ids: ["l4_verbs", "l4_nouns", "l4_adjadv", "l4_ausdruecke"] },
+    { name: "Grammatik · Grammar", ids: ["l4_trennbar", "l4_vokal", "l4_aux", "l4_modal", "l4_satz"] },
+    { name: "Uhrzeit & Alltag · Time & Daily Life", ids: ["l4_uhrzeit", "l4_tag", "l4_bord"] },
+    { name: "Sprechen · Conversation", ids: ["l4_plaene"] },
+];
+const ALL_UNITS = [...UNITS, ...L1_UNITS, ...L2_UNITS, ...L3_UNITS, ...L4_UNITS];
+const MODULES = [
+    { key: "intro", icon: "📓", title: "Introduction", units: UNITS, sections: SECTIONS },
+    { key: "l1", icon: "✏️", title: "Lektion 1", units: L1_UNITS, sections: L1_SECTIONS },
+    { key: "l2", icon: "🏠", title: "Lektion 2", units: L2_UNITS, sections: L2_SECTIONS },
+    { key: "l3", icon: "🍽️", title: "Lektion 3", units: L3_UNITS, sections: L3_SECTIONS },
+    { key: "l4", icon: "⏰", title: "Lektion 4", units: L4_UNITS, sections: L4_SECTIONS },
+];
+const LEKTIONEN_SOON = [5];
+/* Free tier: the Introduction module is free forever; Lektionen need Premium (or the 7-day trial) */
+const FREE_IDS = new Set(UNITS.map(u => u.id));
+const isFreeUnit = (u) => !!u && FREE_IDS.has(u.id);
+const CONJ = {
+    kommen: { ich: "komme", du: "kommst", "er/sie/es": "kommt", wir: "kommen", ihr: "kommt", "Sie/sie": "kommen" },
+    lernen: { ich: "lerne", du: "lernst", "er/sie/es": "lernt", wir: "lernen", ihr: "lernt", "Sie/sie": "lernen" },
+    schreiben: { ich: "schreibe", du: "schreibst", "er/sie/es": "schreibt", wir: "schreiben", ihr: "schreibt", "Sie/sie": "schreiben" },
+    studieren: { ich: "studiere", du: "studierst", "er/sie/es": "studiert", wir: "studieren", ihr: "studiert", "Sie/sie": "studieren" },
+    meinen: { ich: "meine", du: "meinst", "er/sie/es": "meint", wir: "meinen", ihr: "meint", "Sie/sie": "meinen" },
+    spielen: { ich: "spiele", du: "spielst", "er/sie/es": "spielt", wir: "spielen", ihr: "spielt", "Sie/sie": "spielen" },
+    wohnen: { ich: "wohne", du: "wohnst", "er/sie/es": "wohnt", wir: "wohnen", ihr: "wohnt", "Sie/sie": "wohnen" },
+    reisen: { ich: "reise", du: "reist", "er/sie/es": "reist", wir: "reisen", ihr: "reist", "Sie/sie": "reisen" },
+    machen: { ich: "mache", du: "machst", "er/sie/es": "macht", wir: "machen", ihr: "macht", "Sie/sie": "machen" },
+};
+const ENDING = { ich: "-e", du: "-st", "er/sie/es": "-t", wir: "-en", ihr: "-t", "Sie/sie": "-en" };
+/* ---------- Helpers ---------- */
+const shuffle = (a) => { const x = [...a]; for (let i = x.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [x[i], x[j]] = [x[j], x[i]];
+} return x; };
+const pick = (a, n) => shuffle(a).slice(0, n);
+/* Sneaky distractors: prefer options that LOOK like the answer (same first letter, similar length) */
+const hardPick = (cands, target, n) => {
+    const t = String(target || "");
+    const scored = shuffle(cands).map(c => {
+        const s = String(c);
+        let score = Math.random() * 1.2 - Math.abs(s.length - t.length) * 0.2;
+        if (s[0] && t[0] && s[0].toLowerCase() === t[0].toLowerCase())
+            score += 2;
+        if (s.slice(-2) === t.slice(-2))
+            score += 0.8;
+        return [c, score];
+    });
+    scored.sort((a, b) => b[1] - a[1]);
+    return scored.slice(0, n).map(x => x[0]);
+};
+const norm = (s) => s.toLowerCase().trim().replace(/\s+/g, " ").replace(/ä/g, "ae").replace(/ö/g, "oe").replace(/ü/g, "ue").replace(/ß/g, "ss").replace(/[.,!?']/g, "");
+const PRAISE = ["Sehr gut! 🎉", "Prima! ⭐", "Sehr schön! 🙌", "Super! 💛", "Genau! ✅", "Fantastisch! 🔥"];
+const OOPS = ["Nicht ganz…", "Oops! Not quite…", "Almost!", "Keep going…"];
+function buildLesson(unit) {
+    const qs = [];
+    const pool = unit.words;
+    const mc = (prompt, sub, correct, distractors, explain) => ({ kind: "mc", prompt, sub, correct, options: shuffle([correct, ...distractors]), explain });
+    if (unit.special === "numbers") {
+        const nums = pick([7, 13, 16, 21, 25, 33, 44, 47, 59, 68, 72, 83, 91, 99, 101, 111, 125, 132, 203, 247, 315, 428, 516, 673, 811, 872, 928, 944, 967], 8);
+        nums.forEach((n, i) => {
+            if (i % 3 === 2)
+                qs.push({ kind: "type", prompt: "Type this number in digits:", sub: "„" + numDe(n) + "“", answer: String(n), numeric: true, explain: numWhy(n) });
+            else {
+                const wrong = pick(nums.filter(m => m !== n), 3).map(numDe);
+                qs.push(mc("How do you say " + n + " in German?", "Units come first! (einund…)", numDe(n), wrong, numWhy(n)));
+            }
+        });
+        return qs;
+    }
+    if (unit.special === "years") {
+        const yrs = pick([2026, 2023, 2020, 2015, 2010, 2005, 2000, 1999, 1998, 1993, 1978, 1962, 1949, 1925, 1919, 1904, 1879], 5);
+        yrs.forEach((y, i) => {
+            if (i % 2 === 0) {
+                const wrong = pick(yrs.filter(m => m !== y), 3).map(yearDe);
+                qs.push(mc("How do you say the year " + y + "?", "", yearDe(y), wrong, yearWhy(y)));
+            }
+            else
+                qs.push({ kind: "type", prompt: "Which year is this? Type the digits:", sub: "„" + yearDe(y) + "“", answer: String(y), numeric: true, explain: yearWhy(y) });
+        });
+        pick(unit.words.filter(w => w[0].length < 42), 3).forEach(([de, en]) => {
+            const wrong = pick(unit.words.filter(w => w[1] !== en), 3).map(w => w[1]);
+            qs.push(mc("What does this mean?", "„" + de + "“", en, wrong, "„" + de + "“ means “" + en + "”" + artWhy(de)));
+        });
+        return qs;
+    }
+    if (unit.special === "conj") {
+        const verbs = pick(Object.keys(CONJ), 5);
+        verbs.forEach(v => {
+            pick(["ich", "du", "er/sie/es", "wir", "ihr"], 2).forEach(p => {
+                const correct = CONJ[v][p];
+                const wrong = [...new Set(Object.values(CONJ[v]).filter(f => f !== correct))].slice(0, 3);
+                const stem = v.slice(0, -2);
+                qs.push(mc(p + " ______ (" + v + ")", "Rule: remove -en, add the right ending", correct, wrong, "Remove -en from " + v + " → stem “" + stem + "”, then " + p + " takes " + ENDING[p] + " → " + correct));
+            });
+        });
+        pick(unit.words, 2).forEach(([de, en]) => {
+            const wrong = pick(unit.words.filter(w => w[1] !== en), 3).map(w => w[1]);
+            qs.push(mc("What does „" + de + "“ mean?", "", en, wrong, "„" + de + "“ means “" + en + "”"));
+        });
+        return shuffle(qs).slice(0, 9);
+    }
+    if (unit.special === "artikel") {
+        const items = pick(unit.artikel, 9);
+        items.forEach(([noun, art, en]) => {
+            const rule = noun.endsWith("e") && art === "die" ? " Tip: nouns ending in -e are usually feminine."
+                : noun.endsWith("er") && art === "der" ? " Tip: nouns ending in -er are often masculine." : "";
+            qs.push({ kind: "mc", prompt: "Der, die oder das?", sub: "___ " + noun + " (" + en + ")",
+                correct: art, options: shuffle(["der", "die", "das"]),
+                explain: "It's " + art + " " + noun + " — " + (art === "der" ? "masculine" : art === "die" ? "feminine" : "neuter") + "." + rule });
+        });
+        return qs;
+    }
+    if (unit.special === "plural") {
+        const items = pick(unit.plural, 9);
+        items.forEach(([sing, plu]) => {
+            const wrong = pick(unit.plural.filter(p => p[1] !== plu), 3).map(p => p[1]);
+            qs.push({ kind: "mc", prompt: "What is the plural?", sub: "„" + sing + "“",
+                correct: plu, options: shuffle([plu, ...wrong]),
+                explain: sing + " → " + plu + ". All plurals take the article 'die'." });
+        });
+        return qs;
+    }
+    if (unit.special === "ersiees") {
+        const items = pick(unit.fill, 9);
+        items.forEach(([sentence, ans, hint]) => {
+            qs.push({ kind: "mc", prompt: "Er, sie oder es?", sub: sentence,
+                correct: ans, options: shuffle(["er", "sie", "es"]),
+                explain: "The answer is „" + ans + "“ because of " + hint + ". Rule: der → er, die → sie, das → es, plural → sie." });
+        });
+        return qs;
+    }
+    if (unit.special === "conj3") {
+        const verbs = pick(Object.keys(CONJ_L3), 6);
+        verbs.forEach(v => {
+            pick(["ich", "du", "er/sie/es", "wir", "ihr"], 2).forEach(p => {
+                const correct = CONJ_L3[v][p];
+                const wrong = [...new Set(Object.values(CONJ_L3[v]).filter(f => f !== correct))].slice(0, 3);
+                const forms = CONJ_L3[v];
+                qs.push(mc(p + " ______ (" + v + ")", "Watch out — essen, nehmen and mögen are irregular!", correct, wrong, v + ": ich " + forms.ich + ", du " + forms.du + ", er/sie/es " + forms["er/sie/es"] + ", wir " + forms.wir + ", ihr " + forms.ihr));
+            });
+        });
+        return shuffle(qs).slice(0, 11);
+    }
+    if (unit.special === "akk") {
+        const items = pick(unit.akk, 11);
+        items.forEach(([sentence, ans, opts, why]) => {
+            qs.push({ kind: "mc", prompt: "Der Akkusativ: fill the gap", sub: sentence,
+                correct: ans, options: shuffle([...opts]), explain: why + ". Rule: only MASCULINE changes (der→den, ein→einen, kein→keinen)." });
+        });
+        return qs;
+    }
+    if (unit.special === "preis") {
+        pick(unit.prices, 4).forEach(([e, c]) => {
+            const de = numDe(e) + " Euro " + (c ? numDe(c) : "");
+            const wrong = pick(unit.prices.filter(p => !(p[0] === e && p[1] === c)), 3).map(p => numDe(p[0]) + " Euro " + (p[1] ? numDe(p[1]) : ""));
+            qs.push(mc("Was kostet das? How do you say €" + e + "," + String(c).padStart(2, "0") + "?", "", de.trim(), wrong.map(w => w.trim()), e + " Euro + " + c + " Cent → " + de.trim()));
+        });
+        pick(unit.cents, 2).forEach(n => {
+            qs.push({ kind: "type", prompt: "How many cents is this? Type the digits:", sub: "„" + numDe(n) + " Cent“", answer: String(n), numeric: true, explain: numWhy(n) });
+        });
+        pick(unit.words, 5).forEach(([de, en]) => {
+            const wrong = pick(unit.words.filter(w => w[1] !== en), 3).map(w => w[1]);
+            qs.push(mc("What does this mean?", "„" + de + "“", en, wrong, "„" + de + "“ means “" + en + "”"));
+        });
+        return shuffle(qs);
+    }
+    if (unit.special === "sep4") {
+        const verbs = pick(Object.keys(SEP_L4), 6);
+        verbs.forEach(v => {
+            const t = SEP_L4[v];
+            const base = v.replace(t.pre, "");
+            pick(["ich", "du", "er/sie/es", "wir", "ihr"], 2).forEach(p => {
+                const correct = t[p];
+                const wrong = [...new Set(["ich", "du", "er/sie/es", "wir", "ihr", "Sie/sie"].map(x => t[x]).filter(f => f !== correct))].slice(0, 3);
+                qs.push(mc(p + " ______ " + t.pre, v + " · " + t.en, correct, wrong, v + " = " + t.pre + " + " + base + ". Conjugate the base verb, then the prefix „" + t.pre + "“ flies to the END: " + p + " " + correct + " … " + t.pre + "."));
+            });
+        });
+        pick(unit.words.filter(w => w[0].includes(" ")), 2).forEach(([de, en]) => {
+            const wrong = pick(unit.words.filter(w => w[1] !== en), 3).map(w => w[1]);
+            qs.push(mc("What does this mean?", "„" + de + "“", en, wrong, "„" + de + "“ means “" + en + "” — notice the prefix at the very end!"));
+        });
+        return shuffle(qs).slice(0, 11);
+    }
+    if (unit.special === "vokal4") {
+        const verbs = pick(Object.keys(VOK_L4), 6);
+        verbs.forEach(v => {
+            pick(["ich", "du", "er/sie/es", "wir", "ihr"], 2).forEach(p => {
+                const correct = VOK_L4[v][p];
+                const wrong = [...new Set(Object.values(VOK_L4[v]).filter(f => f !== correct))].slice(0, 3);
+                const forms = VOK_L4[v];
+                qs.push(mc(p + " ______ (" + v + ")", "Watch out — the vowel changes for du and er/sie/es!", correct, wrong, v + ": ich " + forms.ich + ", du " + forms.du + ", er/sie/es " + forms["er/sie/es"] + ", wir " + forms.wir + ", ihr " + forms.ihr + " — only du & er/sie/es change the vowel!"));
+            });
+        });
+        return shuffle(qs).slice(0, 10);
+    }
+    if (unit.special === "aux4") {
+        const verbs = pick(Object.keys(AUX_L4), 5);
+        verbs.forEach(v => {
+            pick(["ich", "du", "er/sie/es", "wir", "ihr"], 2).forEach(p => {
+                const correct = AUX_L4[v][p];
+                const wrong = [...new Set(Object.values(AUX_L4[v]).filter(f => f !== correct))].slice(0, 3);
+                const forms = AUX_L4[v];
+                qs.push(mc(p + " ______ (" + v + ")", "Auxiliary verbs are irregular — memorise them!", correct, wrong, v + ": ich " + forms.ich + ", du " + forms.du + ", er/sie/es " + forms["er/sie/es"] + ", wir " + forms.wir + ", ihr " + forms.ihr));
+            });
+        });
+        pick(unit.words.filter(w => w[0].includes(" ")), 2).forEach(([de, en]) => {
+            const wrong = pick(unit.words.filter(w => w[1] !== en), 3).map(w => w[1]);
+            qs.push(mc("What does this mean?", "„" + de + "“", en, wrong, "„" + de + "“ means “" + en + "”"));
+        });
+        return shuffle(qs).slice(0, 10);
+    }
+    if (unit.special === "modal4") {
+        const verbs = pick(Object.keys(MODAL_L4), 5);
+        verbs.forEach(v => {
+            pick(["ich", "du", "er/sie/es", "wir", "ihr"], 2).forEach(p => {
+                const correct = MODAL_L4[v][p];
+                const wrong = [...new Set(Object.values(MODAL_L4[v]).filter(f => f !== correct))].slice(0, 3);
+                const forms = MODAL_L4[v];
+                qs.push(mc(p + " ______ (" + v + ")", v + " = " + MODAL_EN[v], correct, wrong, v + ": ich " + forms.ich + ", du " + forms.du + ", er/sie/es " + forms["er/sie/es"] + ", wir " + forms.wir + ", ihr " + forms.ihr + " — ich and er/sie/es are TWINS with modal verbs!"));
+            });
+        });
+        pick(Object.keys(MODAL_EN), 2).forEach(v => {
+            const wrong = pick(Object.keys(MODAL_EN).filter(x => x !== v), 3).map(x => MODAL_EN[x]);
+            qs.push(mc("What does „" + v + "“ mean?", "", MODAL_EN[v], wrong, "„" + v + "“ means “" + MODAL_EN[v] + "”. Tip: möchten is more polite than wollen!"));
+        });
+        return shuffle(qs).slice(0, 11);
+    }
+    if (unit.special === "satz4") {
+        const items = pick(unit.satz, 10);
+        items.forEach(([good, bad, en]) => {
+            qs.push(mc("Which word order is correct? 🧩", "“" + en + "”", good, [bad], "„" + good + "“ — the modal verb sits in position 2 and the action verb goes to the very END in its infinitive form."));
+        });
+        return qs;
+    }
+    if (unit.special === "uhr4") {
+        const times = pick([[7, 0], [7, 5], [7, 15], [7, 30], [7, 45], [8, 30], [9, 30], [10, 30], [7, 25], [7, 20], [7, 35], [7, 40], [6, 45], [3, 15], [5, 50], [11, 55], [2, 10], [12, 30]], 7);
+        times.forEach(([h, m], i) => {
+            const t = h + ":" + String(m).padStart(2, "0");
+            if (i % 2 === 0) {
+                const wrong = pick(times.filter(x => !(x[0] === h && x[1] === m)), 3).map(([a, b]) => timeDe(a, b));
+                qs.push(mc("Wie spät ist es? How do you say " + t + "?", "", timeDe(h, m), wrong, timeWhy(h, m)));
+            }
+            else {
+                const others = pick(times.filter(x => !(x[0] === h && x[1] === m)), 3).map(([a, b]) => a + ":" + String(b).padStart(2, "0"));
+                qs.push({ kind: "mc", prompt: "Which time is this?", sub: "„" + timeDe(h, m) + "“",
+                    correct: t, options: shuffle([t, ...others]), explain: timeWhy(h, m) });
+            }
+        });
+        pick([[7, 19], [3, 15], [9, 21], [10, 22], [8, 20], [11, 23]], 2).forEach(([pm, h24]) => {
+            qs.push({ kind: "type", prompt: "24-hour clock: type " + pm + ":00 pm as a 24-hour number:", sub: "e.g. 1 pm → 13", answer: String(h24), numeric: true, explain: pm + " pm = " + pm + " + 12 = " + h24 + ":00 Uhr" });
+        });
+        pick(unit.words, 2).forEach(([de, en]) => {
+            const wrong = pick(unit.words.filter(w => w[1] !== en), 3).map(w => w[1]);
+            qs.push(mc("What does „" + de + "“ mean?", "", en, wrong, "„" + de + "“ means “" + en + "”"));
+        });
+        return shuffle(qs);
+    }
+    if (unit.special === "conj2") {
+        const verbs = pick(Object.keys(CONJ_L1), 5);
+        verbs.forEach(v => {
+            pick(["ich", "du", "er/sie/es", "wir", "ihr"], 2).forEach(p => {
+                const correct = CONJ_L1[v][p];
+                const wrong = [...new Set(Object.values(CONJ_L1[v]).filter(f => f !== correct))].slice(0, 3);
+                const forms = CONJ_L1[v];
+                qs.push(mc(p + " ______ (" + v + ")", "Pick the correct form", correct, wrong, v + ": ich " + forms.ich + ", du " + forms.du + ", er/sie/es " + forms["er/sie/es"] + ", wir " + forms.wir + ", ihr " + forms.ihr));
+            });
+        });
+        pick(unit.words, 2).forEach(([de, en]) => {
+            const wrong = pick(unit.words.filter(w => w[1] !== en), 3).map(w => w[1]);
+            qs.push(mc("What does „" + de + "“ mean?", "", en, wrong, "„" + de + "“ means “" + en + "”"));
+        });
+        return shuffle(qs).slice(0, 9);
+    }
+    if (unit.special === "euro") {
+        const prices = pick([13, 19, 21, 24, 31, 33, 47, 52, 55, 66, 76, 88, 93, 95], 5);
+        prices.forEach((n, i) => {
+            if (i % 2 === 0) {
+                const wrong = pick(prices.filter(m => m !== n), 3).map(m => numDe(m) + " Euro");
+                qs.push(mc("How do you say €" + n + "?", "", numDe(n) + " Euro", wrong, numWhy(n)));
+            }
+            else
+                qs.push({ kind: "type", prompt: "How much is this? Type the digits:", sub: "„" + numDe(n) + " Euro“", answer: String(n), numeric: true, explain: numWhy(n) });
+        });
+        const maths = pick([[40, "plus", 3], [7, "plus", 10], [60, "minus", 20], [8, "mal", 4], [20, "geteilt durch", 2], [30, "minus", 12], [6, "mal", 5]], 2);
+        maths.forEach(([a, op, b]) => {
+            const res = op === "plus" ? a + b : op === "minus" ? a - b : op === "mal" ? a * b : a / b;
+            qs.push({ kind: "type", prompt: "Do the maths! Type the answer in digits:", sub: "„" + numDe(a) + " " + op + " " + numDe(b) + "“", answer: String(res), numeric: true, explain: numDe(a) + " (" + a + ") " + op + " " + numDe(b) + " (" + b + ") = " + numDe(res) + " (" + res + ")" });
+        });
+        pick(unit.words, 2).forEach(([de, en]) => {
+            const wrong = pick(unit.words.filter(w => w[1] !== en), 3).map(w => w[1]);
+            qs.push(mc("What does „" + de + "“ mean?", "", en, wrong, "„" + de + "“ means “" + en + "”"));
+        });
+        return shuffle(qs);
+    }
+    const chosen = pick(pool, Math.min(11, pool.length));
+    chosen.forEach(([de, en], i) => {
+        const why = "„" + de + "“ means “" + en + "”" + artWhy(de);
+        if (i === 3 && pool.length >= 4)
+            qs.push({ kind: "match", pairs: pick(pool.filter(w => w[0].length < 24), 4) });
+        else if (!unit.noType && i === 6 && de.length <= 14 && !de.includes(" "))
+            qs.push({ kind: "type", prompt: "Type the German for:", sub: "„" + en + "“", answer: de, umlauts: true, explain: why });
+        else if (i % 4 === 3) {
+            const wrong = hardPick(pool.filter(w => w[1] !== en).map(w => w[1]), en, 3);
+            qs.push(mc("What does this mean?", "„" + de + "“", en, wrong, why));
+        }
+        else {
+            const wrong = hardPick(pool.filter(w => w[0] !== de).map(w => w[0]), de, 3);
+            qs.push(mc("How do you say it in German?", "„" + en + "“", de, wrong, why));
+        }
+    });
+    return qs;
+}
+/* ---------- Bee mascot & 50 avatar variants 🐝 ---------- */
+const BEE_COLORS = [
+    { b: "#FFCE00", s: "#1F1A14", n: "Gold" },
+    { b: "#FFB300", s: "#5A3E1B", n: "Honey" },
+    { b: "#FFE066", s: "#1F1A14", n: "Lemon" },
+    { b: "#FF9E7D", s: "#7A2E1D", n: "Peach" },
+    { b: "#F8A5C2", s: "#8E2F55", n: "Rosa" },
+    { b: "#A8E6CF", s: "#1F6B4E", n: "Mint" },
+    { b: "#B8B5FF", s: "#3F3D8F", n: "Lila" },
+    { b: "#9AD0F5", s: "#1F5E8F", n: "Sky" },
+    { b: "#F76C5E", s: "#7A1F1F", n: "Ruby" },
+    { b: "#F0EDE6", s: "#1F1A14", n: "Snow" },
+];
+const BEE_STYLES = ["Classic", "Bow", "Royal", "Smart", "Cool"];
+const beeName = (i) => BEE_STYLES[Math.floor((i || 0) / 10) % 5] + " " + BEE_COLORS[(i || 0) % 10].n;
+const Bee = ({ size = 120, bob = false, v = null }) => {
+    const c = v == null ? { b: C.gold, s: C.ink } : BEE_COLORS[v % 10];
+    const st = v == null ? "Classic" : BEE_STYLES[Math.floor(v / 10) % 5];
+    const id = "bb" + (v == null ? "L" : v);
+    return (React.createElement("svg", { width: size, height: size, viewBox: "0 0 200 200", className: bob ? "bee-bob" : "", style: { overflow: "visible" } },
+        React.createElement("ellipse", { cx: "60", cy: "55", rx: "30", ry: "19", fill: "#FFFFFF", opacity: "0.9", stroke: C.ink, strokeWidth: "4", transform: "rotate(-28 60 55)" }),
+        React.createElement("ellipse", { cx: "140", cy: "55", rx: "30", ry: "19", fill: "#FFFFFF", opacity: "0.9", stroke: C.ink, strokeWidth: "4", transform: "rotate(28 140 55)" }),
+        React.createElement("path", { d: "M80 72 Q70 48 58 40", fill: "none", stroke: C.ink, strokeWidth: "5", strokeLinecap: "round" }),
+        React.createElement("path", { d: "M120 72 Q130 48 142 40", fill: "none", stroke: C.ink, strokeWidth: "5", strokeLinecap: "round" }),
+        React.createElement("circle", { cx: "56", cy: "38", r: "8", fill: C.red }),
+        React.createElement("circle", { cx: "144", cy: "38", r: "8", fill: C.red }),
+        React.createElement("ellipse", { cx: "100", cy: "120", rx: "60", ry: "52", fill: c.b, stroke: C.ink, strokeWidth: "6" }),
+        React.createElement("clipPath", { id: id },
+            React.createElement("ellipse", { cx: "100", cy: "120", rx: "57", ry: "49" })),
+        React.createElement("g", { clipPath: "url(#" + id + ")" },
+            React.createElement("rect", { x: "40", y: "120", width: "120", height: "17", fill: c.s }),
+            React.createElement("rect", { x: "40", y: "151", width: "120", height: "17", fill: c.s })),
+        React.createElement("circle", { cx: "100", cy: "174", r: "7", fill: C.green, stroke: C.ink, strokeWidth: "3" }),
+        st !== "Cool" && React.createElement(React.Fragment, null,
+            React.createElement("circle", { cx: "80", cy: "102", r: "8", fill: C.ink }),
+            React.createElement("circle", { cx: "120", cy: "102", r: "8", fill: C.ink }),
+            React.createElement("circle", { cx: "83", cy: "99", r: "2.6", fill: "#fff" }),
+            React.createElement("circle", { cx: "123", cy: "99", r: "2.6", fill: "#fff" })),
+        React.createElement("path", { d: "M86 116 q14 13 28 0", fill: "none", stroke: C.ink, strokeWidth: "6", strokeLinecap: "round" }),
+        React.createElement("circle", { cx: "66", cy: "114", r: "6", fill: C.red, opacity: "0.45" }),
+        React.createElement("circle", { cx: "134", cy: "114", r: "6", fill: C.red, opacity: "0.45" }),
+        st === "Bow" && React.createElement(React.Fragment, null,
+            React.createElement("path", { d: "M100 60 L76 46 L76 72 Z", fill: "#F45B8F", stroke: C.ink, strokeWidth: "3.5" }),
+            React.createElement("path", { d: "M100 60 L124 46 L124 72 Z", fill: "#F45B8F", stroke: C.ink, strokeWidth: "3.5" }),
+            React.createElement("circle", { cx: "100", cy: "60", r: "7", fill: "#FB8AB5", stroke: C.ink, strokeWidth: "3.5" }),
+            React.createElement("path", { d: "M68 91 l8 -5 M74 88 l6 -6 M80 87 l4 -7", stroke: C.ink, strokeWidth: "2.5", strokeLinecap: "round" }),
+            React.createElement("path", { d: "M132 91 l-8 -5 M126 88 l-6 -6 M120 87 l-4 -7", stroke: C.ink, strokeWidth: "2.5", strokeLinecap: "round" })),
+        st === "Royal" && React.createElement(React.Fragment, null,
+            React.createElement("path", { d: "M74 62 L74 42 L88 54 L100 36 L112 54 L126 42 L126 62 Z", fill: "#FFD84D", stroke: C.ink, strokeWidth: "4" }),
+            React.createElement("circle", { cx: "100", cy: "47", r: "3.5", fill: C.red })),
+        st === "Smart" && React.createElement(React.Fragment, null,
+            React.createElement("circle", { cx: "80", cy: "102", r: "14", fill: "none", stroke: C.ink, strokeWidth: "4" }),
+            React.createElement("circle", { cx: "120", cy: "102", r: "14", fill: "none", stroke: C.ink, strokeWidth: "4" }),
+            React.createElement("path", { d: "M94 102 h12", stroke: C.ink, strokeWidth: "4" })),
+        st === "Cool" && React.createElement(React.Fragment, null,
+            React.createElement("rect", { x: "62", y: "91", width: "76", height: "21", rx: "10", fill: C.ink }),
+            React.createElement("circle", { cx: "80", cy: "101", r: "4", fill: "#5A5A5A" }),
+            React.createElement("circle", { cx: "120", cy: "101", r: "4", fill: "#5A5A5A" }),
+            React.createElement("path", { d: "M56 96 l8 2 M144 96 l-8 2", stroke: C.ink, strokeWidth: "4", strokeLinecap: "round" }))));
+};
+const Tree = ({ size = 40 }) => (React.createElement("svg", { width: size, height: size * 1.3, viewBox: "0 0 40 52" },
+    React.createElement("rect", { x: "17", y: "32", width: "6", height: "16", rx: "2.5", fill: "#8B5E34" }),
+    React.createElement("circle", { cx: "20", cy: "19", r: "13", fill: "#2F9E5B" }),
+    React.createElement("circle", { cx: "10.5", cy: "26", r: "8.5", fill: "#37B36A" }),
+    React.createElement("circle", { cx: "29.5", cy: "26", r: "8.5", fill: "#27804A" }),
+    React.createElement("circle", { cx: "15", cy: "15", r: "2", fill: "#CFF3DE", opacity: ".8" })));
+const Pill = ({ children, style }) => (React.createElement("span", { className: "px-3 py-1.5 rounded-full text-sm font-bold whitespace-nowrap", style: style }, children));
+/* ================= APP ================= */
+function SomaDeutsch() {
+    const [screen, setScreen] = useState("splash");
+    const [progress, setProgress] = useState({ xp: 0, streak: 0, lastDay: null, done: {}, name: "", uid: null, sound: true, avatar: 0, trialStart: null, premiumUntil: null });
+    const [unit, setUnit] = useState(null);
+    const [qs, setQs] = useState([]);
+    const [qi, setQi] = useState(0);
+    const [hearts, setHearts] = useState(5);
+    const [mistakes, setMistakes] = useState(0);
+    const [sel, setSel] = useState(null);
+    const [typed, setTyped] = useState("");
+    const [feedback, setFeedback] = useState(null);
+    const [matchSel, setMatchSel] = useState(null);
+    const [matchDone, setMatchDone] = useState({});
+    const [matchWrong, setMatchWrong] = useState(null);
+    const [earned, setEarned] = useState(0);
+    const [board, setBoard] = useState(null); // null=loading, []=list, "err"
+    const [nameDraft, setNameDraft] = useState("");
+    const [savedLesson, setSavedLesson] = useState(null);
+    const [mod, setMod] = useState(null);
+    const [authU, setAuthU] = useState("");
+    const [authP, setAuthP] = useState("");
+    const [authErr, setAuthErr] = useState("");
+    const [authBusy, setAuthBusy] = useState(false);
+    const [blitzQs, setBlitzQs] = useState([]);
+    const [blitzI, setBlitzI] = useState(0);
+    const [blitzScore, setBlitzScore] = useState(0);
+    const [blitzT, setBlitzT] = useState(60);
+    const [blitzAwarded, setBlitzAwarded] = useState(true);
+    const [blitzSel, setBlitzSel] = useState(null);
+    const [blitzFrom, setBlitzFrom] = useState(null);
+    const [blitzRun, setBlitzRun] = useState(0);
+    const [payCode, setPayCode] = useState("");
+    const [payErr, setPayErr] = useState("");
+    const [payBusy, setPayBusy] = useState(false);
+    const [ownOn, setOwnOn] = useState(false);
+    const [ownShow, setOwnShow] = useState(false);
+    const [upsell, setUpsell] = useState(false);
+    const [ownPin, setOwnPin] = useState("");
+    const [ownErr, setOwnErr] = useState("");
+    const [ownName, setOwnName] = useState("");
+    const [ownCode, setOwnCode] = useState(null);
+    const userKey = (u) => "user_" + u.trim().toLowerCase().replace(/[\s\/\\'"]+/g, "_");
+    const doSignup = async () => {
+        const u = authU.trim(), p = authP.trim();
+        if (!u)
+            return setAuthErr("Please pick a username");
+        if (!p)
+            return setAuthErr("Please pick a password");
+        setAuthBusy(true);
+        setAuthErr("");
+        // Check if the username is taken (best effort — skip if service unavailable)
+        let exists = false;
+        try {
+            if (window.storage) {
+                const r = await window.storage.get(userKey(u), true);
+                if (r && r.value)
+                    exists = true;
+            }
+        }
+        catch (e) { /* key not found or service unavailable — treat as free */ }
+        if (exists) {
+            setAuthErr("That username is already taken");
+            setAuthBusy(false);
+            return;
+        }
+        const hash = await sha(p);
+        const ts = progRef.current.trialStart || new Date().toISOString();
+        // Register the account online (best effort — never blocks account creation)
+        try {
+            if (window.storage)
+                await window.storage.set(userKey(u), JSON.stringify({ name: u, hash, avatar: progress.avatar, xp: 0, streak: 0, done: {}, trialStart: ts, premiumUntil: progRef.current.premiumUntil || null }), true);
+        }
+        catch (e) { /* offline — account still works locally and will sync later */ }
+        save({ name: u, hash, avatar: progress.avatar, xp: 0, streak: 0, done: {}, lastDay: null, trialStart: ts });
+        sfx(SFX.win);
+        setAuthP("");
+        setAuthBusy(false);
+        setScreen("menu");
+    };
+    const doLogin = async () => {
+        const u = authU.trim();
+        if (!u || !authP)
+            return setAuthErr("Enter your username and password");
+        setAuthBusy(true);
+        setAuthErr("");
+        const hash = await sha(authP);
+        const hashTrim = await sha(authP.trim());
+        let rec = null;
+        try {
+            if (window.storage) {
+                const r = await window.storage.get(userKey(u), true);
+                if (r && r.value)
+                    rec = JSON.parse(r.value);
+            }
+        }
+        catch (e) { /* not found or service unavailable */ }
+        // Fallback: account created on this device while offline
+        if (!rec && progress.hash && progress.name && progress.name.toLowerCase() === u.toLowerCase()) {
+            rec = { name: progress.name, hash: progress.hash, avatar: progress.avatar, xp: progress.xp, streak: progress.streak, done: progress.done };
+        }
+        if (!rec) {
+            setAuthErr("Account not found — create one below");
+            setAuthBusy(false);
+            return;
+        }
+        if (hash !== rec.hash && hashTrim !== rec.hash) {
+            setAuthErr("Wrong password — try again");
+            setAuthBusy(false);
+            return;
+        }
+        save({ name: rec.name, hash: rec.hash, avatar: rec.avatar || 0, xp: rec.xp || 0, streak: rec.streak || 0, done: rec.done || {},
+            trialStart: rec.trialStart || progRef.current.trialStart || new Date().toISOString(),
+            premiumUntil: rec.premiumUntil || null });
+        sfx(SFX.win);
+        setAuthP("");
+        setAuthBusy(false);
+        setScreen("menu");
+    };
+    const logout = () => { sfx(SFX.click); save({ name: "", hash: null }); setAuthU(""); setAuthP(""); setScreen("splash"); };
+    const progRef = useRef(progress);
+    progRef.current = progress;
+    const sfx = (fn) => { if (progRef.current.sound) {
+        try {
+            fn();
+        }
+        catch (e) { }
+    } };
+    useEffect(() => {
+        (async () => {
+            let p = {};
+            try {
+                if (window.storage) {
+                    const r = await window.storage.get("soma_deutsch_v2");
+                    if (r && r.value)
+                        p = JSON.parse(r.value);
+                }
+            }
+            catch (e) { /* fresh start */ }
+            if (!p.trialStart)
+                p.trialStart = new Date().toISOString();
+            setProgress(prev => (Object.assign(Object.assign({}, prev), p)));
+            setNameDraft(p.name || "");
+            try {
+                if (window.storage)
+                    window.storage.set("soma_deutsch_v2", JSON.stringify(Object.assign(Object.assign({}, progRef.current), p)));
+            }
+            catch (e) { }
+            try {
+                if (window.storage) {
+                    const rl = await window.storage.get("soma_lesson_v1");
+                    if (rl && rl.value)
+                        setSavedLesson(JSON.parse(rl.value));
+                }
+            }
+            catch (e) { /* no unfinished lesson */ }
+        })();
+    }, []);
+    // Keep the current lesson saved so the player can resume after leaving
+    useEffect(() => {
+        if (screen === "lesson" && unit && unit.id !== "review" && qs.length) {
+            const s = { unitId: unit.id, qs, qi, hearts, mistakes };
+            setSavedLesson(s);
+            try {
+                if (window.storage)
+                    window.storage.set("soma_lesson_v1", JSON.stringify(s));
+            }
+            catch (e) { }
+        }
+    }, [screen, qi, hearts, mistakes]);
+    const clearLesson = () => {
+        setSavedLesson(null);
+        try {
+            if (window.storage)
+                window.storage.delete("soma_lesson_v1");
+        }
+        catch (e) { }
+    };
+    const save = (p) => {
+        const full = Object.assign(Object.assign({}, progRef.current), p);
+        setProgress(full);
+        try {
+            if (window.storage)
+                window.storage.set("soma_deutsch_v2", JSON.stringify(full));
+        }
+        catch (e) { }
+        // push to shared leaderboard if the player has a name
+        try {
+            if (window.storage && full.name) {
+                const uid = full.uid || ("u" + Math.random().toString(36).slice(2, 9));
+                if (!full.uid) {
+                    setProgress(prev => (Object.assign(Object.assign({}, prev), { uid })));
+                    window.storage.set("soma_deutsch_v2", JSON.stringify(Object.assign(Object.assign({}, full), { uid })));
+                }
+                window.storage.set("lb_" + (full.uid || uid), JSON.stringify({ name: full.name, xp: full.xp, streak: full.streak, avatar: full.avatar || 0, stars: Object.values(full.done || {}).reduce((a, b) => a + b, 0) }), true);
+                if (full.hash)
+                    window.storage.set(userKey(full.name), JSON.stringify({ name: full.name, hash: full.hash, avatar: full.avatar || 0, xp: full.xp, streak: full.streak, done: full.done, trialStart: full.trialStart || null, premiumUntil: full.premiumUntil || null }), true);
+            }
+        }
+        catch (e) { }
+    };
+    const loadBoard = async () => {
+        setBoard(null);
+        try {
+            const l = await window.storage.list("lb_", true);
+            const keys = (l && l.keys ? l.keys : []).slice(0, 60);
+            const rows = [];
+            for (const k of keys) {
+                try {
+                    const r = await window.storage.get(k, true);
+                    if (r && r.value) {
+                        const row = JSON.parse(r.value);
+                        if (row && row.name)
+                            rows.push(row);
+                    }
+                }
+                catch (e) { }
+            }
+            // Always include the current player, even if their row hasn't synced yet
+            const me = progRef.current;
+            if (me.name && !rows.some(r => r.name.toLowerCase() === me.name.toLowerCase())) {
+                rows.push({ name: me.name, xp: me.xp || 0, streak: me.streak || 0, avatar: me.avatar || 0, stars: Object.values(me.done || {}).reduce((a, b) => a + b, 0) });
+            }
+            // One row per player — keep their best score (covers old duplicate uids)
+            const best = {};
+            rows.forEach(r => { const k = r.name.toLowerCase(); if (!best[k] || (r.xp || 0) > (best[k].xp || 0))
+                best[k] = r; });
+            setBoard(Object.values(best).sort((a, b) => (b.xp || 0) - (a.xp || 0)).slice(0, 20));
+        }
+        catch (e) {
+            setBoard("err");
+        }
+    };
+    const unlockedIdx = (units) => {
+        let n = 1;
+        for (const u of units) {
+            if (progress.done[u.id])
+                n++;
+            else
+                break;
+        }
+        return n;
+    };
+    const totalStars = Object.values(progress.done).reduce((a, b) => a + b, 0);
+    const av = progress.name ? progress.avatar : null; // the player's bee, used everywhere once logged in
+    /* ---------- Membership ---------- */
+    const isPremium = !!progress.premiumUntil && progress.premiumUntil >= monthKey(new Date());
+    const trialDaysLeft = () => {
+        if (!progress.trialStart)
+            return 0;
+        const used = Math.floor((Date.now() - new Date(progress.trialStart).getTime()) / 86400000);
+        return Math.max(0, 7 - used);
+    };
+    const inTrial = trialDaysLeft() > 0;
+    const canPlay = (u) => isPremium || isFreeUnit(u);
+    const redeemCode = async () => {
+        if (!progress.name) {
+            setPayErr("Log in first — your code is tied to your username! 🐝");
+            return;
+        }
+        setPayBusy(true);
+        setPayErr("");
+        const mk = monthKey(new Date());
+        const inp = payCode.trim().toUpperCase();
+        const codeM = await personalCode(progress.name, mk);
+        const codeY = await personalCode(progress.name, "Y" + mk);
+        if (inp === codeM) {
+            save({ premiumUntil: mk });
+            setPayCode("");
+            sfx(SFX.win);
+        }
+        else if (inp === codeY) {
+            save({ premiumUntil: mkPlus(mk, 11) });
+            setPayCode("");
+            sfx(SFX.star3);
+        }
+        else {
+            sfx(SFX.wrong);
+            setPayErr("That code isn't valid for YOUR account this month — check with " + MPESA_NAME + "! 🐝");
+        }
+        setPayBusy(false);
+    };
+    const ownUnlock = async () => {
+        const h = await sha("owner:" + ownPin.trim());
+        if (h === OWNER_HASH) {
+            setOwnOn(true);
+            setOwnErr("");
+            setOwnPin("");
+            sfx(SFX.win);
+        }
+        else {
+            sfx(SFX.wrong);
+            setOwnErr("Wrong PIN");
+        }
+    };
+    const ownGen = async () => {
+        const u = ownName.trim();
+        if (!u)
+            return;
+        sfx(SFX.click);
+        const now = new Date();
+        const mk1 = monthKey(now);
+        const nm = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+        const mk2 = monthKey(nm);
+        setOwnCode({ u, c1: await personalCode(u, mk1), cy: await personalCode(u, "Y" + mk1), c2: await personalCode(u, mk2),
+            m1: now.toLocaleString("en", { month: "long" }), m2: nm.toLocaleString("en", { month: "long" }) });
+    };
+    const startLesson = (u) => {
+        if (!canPlay(u)) {
+            sfx(SFX.wrong);
+            setUpsell(true);
+            return;
+        }
+        sfx(SFX.click);
+        const m = MODULES.find(mm => mm.units.some(x => x.id === u.id));
+        if (m)
+            setMod(m);
+        setUnit(u);
+        setQs(buildLesson(u));
+        setQi(0);
+        setHearts(5);
+        setMistakes(0);
+        setSel(null);
+        setTyped("");
+        setFeedback(null);
+        setMatchSel(null);
+        setMatchDone({});
+        setScreen("lesson");
+    };
+    const resumeLesson = () => {
+        if (!savedLesson)
+            return;
+        const u = ALL_UNITS.find(x => x.id === savedLesson.unitId);
+        if (!u) {
+            clearLesson();
+            return;
+        }
+        if (!canPlay(u)) {
+            sfx(SFX.wrong);
+            setUpsell(true);
+            return;
+        }
+        sfx(SFX.click);
+        const m = MODULES.find(mm => mm.units.some(x => x.id === u.id));
+        if (m)
+            setMod(m);
+        setUnit(u);
+        setQs(savedLesson.qs);
+        setQi(savedLesson.qi);
+        setHearts(savedLesson.hearts);
+        setMistakes(savedLesson.mistakes);
+        setSel(null);
+        setTyped("");
+        setFeedback(null);
+        setMatchSel(null);
+        setMatchDone({});
+        setScreen("lesson");
+    };
+    const startReview = () => {
+        const deck = shuffle(progress.review || []).slice(0, 10);
+        if (!deck.length)
+            return;
+        sfx(SFX.click);
+        setUnit({ id: "review", icon: "🔁", color: C.red, title: "Fehler-Review", sub: "Fix your mistakes" });
+        setQs(deck);
+        setQi(0);
+        setHearts(5);
+        setMistakes(0);
+        setSel(null);
+        setTyped("");
+        setFeedback(null);
+        setMatchSel(null);
+        setMatchDone({});
+        setScreen("lesson");
+    };
+    const startBlitz = (m) => {
+        if (m && !m.units.every(canPlay)) {
+            sfx(SFX.wrong);
+            setUpsell(true);
+            return;
+        }
+        sfx(SFX.click);
+        setBlitzFrom(m || null);
+        const qsB = [];
+        const unitsList = m ? m.units : MODULES.flatMap(x => x.units.slice(0, unlockedIdx(x.units)));
+        unitsList.forEach(u => {
+            (u.words || []).forEach(([de, en]) => {
+                if (de.length > 38 || en.length > 38)
+                    return;
+                if (Math.random() < 0.5) {
+                    const wrongs = hardPick((u.words || []).filter(w => w[1] !== en).map(w => w[1]), en, 3);
+                    if (wrongs.length === 3)
+                        qsB.push({ label: "WHAT DOES THIS MEAN?", prompt: de, correct: en, options: shuffle([en, ...wrongs]) });
+                }
+                else {
+                    const wrongs = hardPick((u.words || []).filter(w => w[0] !== de).map(w => w[0]), de, 3);
+                    if (wrongs.length === 3)
+                        qsB.push({ label: "HOW DO YOU SAY IT IN GERMAN?", prompt: en, correct: de, options: shuffle([de, ...wrongs]) });
+                }
+            });
+        });
+        setBlitzQs(shuffle(qsB).slice(0, 60));
+        setBlitzI(0);
+        setBlitzScore(0);
+        setBlitzT(60);
+        setBlitzAwarded(false);
+        setBlitzSel(null);
+        setBlitzRun(0);
+        setScreen("blitz");
+    };
+    const tapBlitz = (opt) => {
+        if (blitzSel !== null || blitzT <= 0)
+            return;
+        const bq = blitzQs[blitzI];
+        const ok = opt === bq.correct;
+        setBlitzSel(opt);
+        const run = ok ? blitzRun + 1 : 0;
+        setBlitzRun(run);
+        if (ok) {
+            sfx(run > 0 && run % 5 === 0 ? SFX.combo : SFX.match);
+            setBlitzScore(s => s + 1);
+        }
+        else
+            sfx(SFX.wrong);
+        setTimeout(() => {
+            setBlitzSel(null);
+            if (blitzI + 1 >= blitzQs.length)
+                setBlitzT(0);
+            else
+                setBlitzI(i => i + 1);
+        }, ok ? 250 : 700);
+    };
+    useEffect(() => {
+        if (screen !== "blitz" || blitzT <= 0)
+            return;
+        if (blitzT <= 10)
+            sfx(SFX.tick);
+        const id = setTimeout(() => setBlitzT(t => t - 1), 1000);
+        return () => clearTimeout(id);
+    }, [screen, blitzT]);
+    useEffect(() => {
+        if (screen === "blitz" && blitzT === 0 && !blitzAwarded) {
+            setBlitzAwarded(true);
+            const today = new Date().toDateString();
+            const yest = new Date(Date.now() - 86400000).toDateString();
+            const streak = progress.lastDay === today ? Math.max(1, progress.streak) : progress.lastDay === yest ? progress.streak + 1 : 1;
+            if (blitzScore > 0)
+                save({ xp: progress.xp + blitzScore * 5, streak, lastDay: today });
+            sfx(blitzScore > 0 ? SFX.win : SFX.lose);
+        }
+    }, [screen, blitzT, blitzAwarded]);
+    const q = qs[qi];
+    const matchTiles = useMemo(() => {
+        if (!q || q.kind !== "match")
+            return null;
+        return { left: shuffle(q.pairs.map(p => p[0])), right: shuffle(q.pairs.map(p => p[1])) };
+    }, [q]);
+    const keyOf = (x) => (x.prompt || "") + "|" + (x.sub || "") + "|" + (x.correct || x.answer || "");
+    const rememberMistake = (x) => {
+        if (!x || x.kind === "match" || (unit && unit.id === "review"))
+            return;
+        const item = { kind: x.kind, prompt: x.prompt, sub: x.sub, correct: x.correct, answer: x.answer, options: x.options, explain: x.explain, numeric: x.numeric, umlauts: x.umlauts };
+        const list = (progRef.current.review || []).filter(r => keyOf(r) !== keyOf(item));
+        list.push(item);
+        save({ review: list.slice(-40) });
+    };
+    const forgetMistake = (x) => {
+        save({ review: (progRef.current.review || []).filter(r => keyOf(r) !== keyOf(x)) });
+    };
+    const check = () => {
+        let ok;
+        if (q.kind === "mc")
+            ok = sel === q.correct;
+        else
+            ok = q.numeric ? typed.trim() === q.answer : norm(typed) === norm(q.answer);
+        if (ok) {
+            sfx(SFX.correct);
+            if (unit && unit.id === "review")
+                forgetMistake(q);
+        }
+        else {
+            sfx(SFX.wrong);
+            setMistakes(m => m + 1);
+            rememberMistake(q);
+        }
+        setFeedback({ ok, correct: q.kind === "mc" ? q.correct : q.answer, explain: q.explain });
+    };
+    const next = () => {
+        sfx(SFX.click);
+        if (qi + 1 >= qs.length) {
+            finish();
+            return;
+        }
+        setQi(qi + 1);
+        setSel(null);
+        setTyped("");
+        setFeedback(null);
+        setMatchSel(null);
+        setMatchDone({});
+    };
+    const finish = () => {
+        const correct = qs.length - mistakes;
+        const isReview = unit.id === "review";
+        const stars = mistakes === 0 ? 3 : mistakes <= 2 ? 2 : 1;
+        const gained = Math.max(10, correct * 10 + (mistakes === 0 ? 20 : 0));
+        const today = new Date().toDateString();
+        const yest = new Date(Date.now() - 86400000).toDateString();
+        const streak = progress.lastDay === today ? Math.max(1, progress.streak) : progress.lastDay === yest ? progress.streak + 1 : 1;
+        const done = isReview ? progress.done : Object.assign(Object.assign({}, progress.done), { [unit.id]: Math.max(progress.done[unit.id] || 0, stars) });
+        setEarned(gained);
+        save({ xp: progress.xp + gained, streak, lastDay: today, done });
+        if (!isReview)
+            clearLesson();
+        sfx(mistakes === 0 ? SFX.star3 : SFX.win);
+        setScreen("done");
+    };
+    const tapMatch = (side, val) => {
+        if (matchDone[val] || feedback)
+            return;
+        if (!matchSel) {
+            sfx(SFX.click);
+            setMatchSel({ side, val });
+            return;
+        }
+        if (matchSel.side === side) {
+            sfx(SFX.click);
+            setMatchSel({ side, val });
+            return;
+        }
+        const de = side === "left" ? val : matchSel.val;
+        const en = side === "left" ? matchSel.val : val;
+        const hit = q.pairs.some(p => p[0] === de && p[1] === en);
+        if (hit) {
+            sfx(SFX.match);
+            const nd = Object.assign(Object.assign({}, matchDone), { [de]: true, [en]: true });
+            setMatchDone(nd);
+            setMatchSel(null);
+            if (Object.keys(nd).length === q.pairs.length * 2)
+                setTimeout(() => { sfx(SFX.correct); setFeedback({ ok: true, correct: "", explain: null }); }, 250);
+        }
+        else {
+            sfx(SFX.wrong);
+            setMatchWrong([matchSel.val, val]);
+            setMatchSel(null);
+            setTimeout(() => setMatchWrong(null), 500);
+        }
+    };
+    const font = { fontFamily: "'Fredoka','Baloo 2','Trebuchet MS',sans-serif" };
+    const body = { fontFamily: "'Nunito','Trebuchet MS',sans-serif" };
+    const bigBtn = (bg) => (Object.assign({ background: bg, borderColor: "rgba(0,0,0,.25)" }, font));
+    return (React.createElement("div", { className: "min-h-screen select-none", style: Object.assign(Object.assign({ background: C.bg }, body), { color: C.ink, WebkitTapHighlightColor: "transparent" }) },
+        React.createElement("style", null, `
+        @import url('https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&family=Nunito:wght@600;700;800&display=swap');
+        *{touch-action:manipulation}
+        input,textarea{user-select:text;-webkit-user-select:text}
+        .pop:active{transform:scale(.96)} .pop{transition:transform .08s}
+        @keyframes bob{0%,100%{transform:translateY(0)}50%{transform:translateY(-10px)}}
+        .bee-bob{animation:bob 2.2s ease-in-out infinite}
+        @keyframes sway{0%,100%{transform:rotate(-3.5deg)}50%{transform:rotate(3.5deg)}}
+        .sway{animation:sway 4.5s ease-in-out infinite;transform-origin:50% 96%}
+        @keyframes fly{0%,100%{transform:translate(0,0)}25%{transform:translate(10px,-12px)}50%{transform:translate(-6px,-20px)}75%{transform:translate(-12px,-6px)}}
+        .fly{animation:fly 5.5s ease-in-out infinite}
+        @keyframes flow{to{stroke-dashoffset:-76}}
+        .river-flow{animation:flow 5s linear infinite}
+        .hex{clip-path:polygon(50% 0%, 93% 25%, 93% 75%, 50% 100%, 7% 75%, 7% 25%)}
+        @keyframes hexpulse{0%,100%{transform:scale(1)}50%{transform:scale(1.06)}}
+        .hexpulse{animation:hexpulse 1.6s ease-in-out infinite}
+        @keyframes fadeup{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:translateY(0)}}
+        .fadeup{animation:fadeup .4s ease both}
+        @media (prefers-reduced-motion: reduce){.bee-bob,.fadeup,.sway,.fly,.river-flow,.hexpulse{animation:none}}
+      `),
+        screen !== "splash" && (React.createElement("div", { className: "flex h-2 w-full sticky top-0 z-20" },
+            React.createElement("div", { className: "flex-1", style: { background: C.ink } }),
+            React.createElement("div", { className: "flex-1", style: { background: C.red } }),
+            React.createElement("div", { className: "flex-1", style: { background: C.gold } }),
+            React.createElement("div", { className: "flex-1", style: { background: C.green } }))),
+        screen === "splash" && (React.createElement("div", { onClick: () => { sfx(SFX.win); setScreen(progress.name ? "menu" : "login"); }, role: "button", tabIndex: 0, onKeyDown: (e) => { if (e.key === "Enter" || e.key === " ") {
+                sfx(SFX.win);
+                setScreen(progress.name ? "menu" : "login");
+            } }, className: "min-h-screen flex flex-col items-center justify-center px-6 text-center cursor-pointer", style: { background: "radial-gradient(circle at 50% 30%, #FFE477 0%, " + C.gold + " 70%)" } },
+            React.createElement("div", { className: "pop pointer-events-none" },
+                React.createElement(Bee, { size: 190, bob: true, v: av })),
+            React.createElement("h1", { style: font, className: "text-5xl font-bold mt-6" },
+                React.createElement("span", { style: { color: C.ink } }, "Soma"),
+                " ",
+                React.createElement("span", { style: { color: C.red } }, "Deutsch")),
+            React.createElement("p", { className: "mt-2 font-bold tracking-widest text-sm", style: { color: C.green } }, "LEARN GERMAN! \uD83C\uDDE9\uD83C\uDDEA"),
+            React.createElement("p", { className: "mt-8 text-sm font-bold opacity-70 fadeup" }, "Tap anywhere to start \uD83D\uDC1D"))),
+        screen === "login" && (React.createElement("div", { className: "max-w-md mx-auto px-5 pt-10 pb-16 fadeup" },
+            React.createElement("div", { className: "flex flex-col items-center text-center" },
+                React.createElement(Bee, { size: 95, bob: true }),
+                React.createElement("h1", { style: font, className: "text-2xl font-bold mt-3" }, "Log in to play"),
+                React.createElement("p", { className: "text-sm opacity-70 mt-1" }, "Welcome back to Soma Deutsch!")),
+            React.createElement("div", { className: "mt-6 space-y-3" },
+                React.createElement("input", { value: authU, onChange: e => { setAuthU(e.target.value.slice(0, 18)); setAuthErr(""); }, placeholder: "Username", autoCapitalize: "none", autoCorrect: "off", className: "w-full p-4 rounded-2xl border-2 font-bold outline-none", style: { borderColor: C.line, background: C.card } }),
+                React.createElement("input", { value: authP, onChange: e => { setAuthP(e.target.value); setAuthErr(""); }, placeholder: "Password", type: "password", className: "w-full p-4 rounded-2xl border-2 font-bold outline-none", style: { borderColor: C.line, background: C.card } }),
+                authErr && React.createElement("div", { className: "p-3 rounded-2xl text-sm font-bold", style: { background: "#FDEBEE", color: C.red } }, authErr),
+                React.createElement("button", { disabled: authBusy, onClick: doLogin, className: "pop w-full py-4 rounded-2xl font-bold text-white text-lg border-b-4", style: Object.assign({ background: authBusy ? "#C9C2B4" : C.green, borderColor: "rgba(0,0,0,.25)" }, font) }, authBusy ? "…" : "LOG IN"),
+                React.createElement("button", { onClick: () => { sfx(SFX.click); setAuthErr(""); setScreen("signup"); }, className: "pop w-full py-3.5 rounded-2xl font-bold border-2", style: Object.assign({ borderColor: C.line, background: C.card }, font) }, "New here? CREATE ACCOUNT")))),
+        screen === "signup" && (React.createElement("div", { className: "max-w-md mx-auto px-5 pt-8 pb-16 fadeup" },
+            React.createElement("div", { className: "flex flex-col items-center text-center" },
+                React.createElement(Bee, { size: 90, bob: true, v: progress.avatar }),
+                React.createElement("h1", { style: font, className: "text-2xl font-bold mt-3" }, "Create your account"),
+                React.createElement("p", { className: "text-sm opacity-70 mt-1" }, "Pick a bee, a username and a password to start learning!")),
+            React.createElement("div", { className: "mt-5" },
+                React.createElement("label", { className: "text-sm font-bold opacity-80" }, "1 \u00B7 Choose your bee avatar \uD83D\uDC1D"),
+                React.createElement("div", { className: "mt-2 grid grid-cols-5 gap-2 p-2 rounded-2xl border-2 overflow-y-auto", style: { borderColor: C.line, background: C.card, maxHeight: 230 } }, Array.from({ length: 50 }).map((_, i) => (React.createElement("button", { key: i, onClick: () => { sfx(SFX.click); setProgress(p => (Object.assign(Object.assign({}, p), { avatar: i }))); }, className: "pop rounded-2xl p-1 flex items-center justify-center", style: { border: progress.avatar === i ? "3px solid " + C.green : "2px solid " + C.line,
+                        background: progress.avatar === i ? "#E8F5EE" : "#FFFDF8" } },
+                    React.createElement(Bee, { v: i, size: 44 }))))),
+                React.createElement("div", { className: "text-center text-sm font-bold mt-2", style: { color: C.green } }, beeName(progress.avatar))),
+            React.createElement("div", { className: "mt-4 space-y-3" },
+                React.createElement("div", null,
+                    React.createElement("label", { className: "text-sm font-bold opacity-80" }, "2 \u00B7 Username"),
+                    React.createElement("input", { value: authU, onChange: e => { setAuthU(e.target.value.slice(0, 18)); setAuthErr(""); }, placeholder: "Pick any username you like", autoCapitalize: "none", autoCorrect: "off", className: "mt-2 w-full p-4 rounded-2xl border-2 font-bold outline-none", style: { borderColor: C.line, background: C.card } })),
+                React.createElement("div", null,
+                    React.createElement("label", { className: "text-sm font-bold opacity-80" }, "3 \u00B7 Password"),
+                    React.createElement("input", { value: authP, onChange: e => { setAuthP(e.target.value); setAuthErr(""); }, placeholder: "Pick any password", type: "password", className: "mt-2 w-full p-4 rounded-2xl border-2 font-bold outline-none", style: { borderColor: C.line, background: C.card } })),
+                authErr && React.createElement("div", { className: "p-3 rounded-2xl text-sm font-bold", style: { background: "#FDEBEE", color: C.red } }, authErr),
+                React.createElement("p", { className: "text-xs opacity-60" }, "Your username, bee, XP and streak will be visible to other players on the leaderboard. Don't reuse a password from another site.")),
+            React.createElement("button", { disabled: authBusy || !authU.trim() || !authP, onClick: doSignup, className: "pop mt-4 w-full py-4 rounded-2xl font-bold text-white text-lg border-b-4", style: Object.assign({ background: (!authBusy && authU.trim() && authP) ? C.green : "#C9C2B4", borderColor: "rgba(0,0,0,.25)" }, font) }, authBusy ? "…" : "CREATE ACCOUNT & PLAY"),
+            React.createElement("button", { onClick: () => { sfx(SFX.click); setAuthErr(""); setScreen("login"); }, className: "pop mt-3 w-full py-3 rounded-2xl font-bold border-2", style: Object.assign({ borderColor: C.line, background: C.card }, font) }, "Already have an account? LOG IN"))),
+        screen === "menu" && (React.createElement("div", { className: "max-w-md mx-auto px-5 fadeup flex flex-col", style: { minHeight: "calc(100vh - 8px)" } },
+            React.createElement("div", { className: "flex flex-col items-center pt-8" },
+                React.createElement(Bee, { size: 100, bob: true, v: av }),
+                React.createElement("h1", { style: font, className: "text-3xl font-bold mt-3" },
+                    React.createElement("span", null, "Soma"),
+                    " ",
+                    React.createElement("span", { style: { color: C.red } }, "Deutsch")),
+                React.createElement("p", { className: "text-sm opacity-70 mt-1" }, progress.name ? "Welcome back, " + progress.name + "! 👋" : "Welcome!"),
+                React.createElement("div", { className: "flex gap-2 mt-3 flex-wrap justify-center" },
+                    React.createElement(Pill, { style: { background: "#FFF3D6", color: "#9a6b00" } },
+                        "\uD83D\uDD25 ",
+                        progress.streak),
+                    React.createElement(Pill, { style: { background: "#E8F5EE", color: C.green } },
+                        "\u26A1 ",
+                        progress.xp,
+                        " XP"),
+                    React.createElement(Pill, { style: { background: "#FDEBEE", color: C.red } },
+                        "\u2605 ",
+                        totalStars),
+                    isPremium
+                        ? React.createElement(Pill, { style: { background: "#F1FAEF", color: C.green } }, "\uD83D\uDC51 Premium")
+                        : inTrial
+                            ? React.createElement(Pill, { style: { background: "#EFE9FD", color: "#5B21B6" } },
+                                "\uD83C\uDF81 ",
+                                trialDaysLeft(),
+                                "d trial")
+                            : React.createElement(Pill, { style: { background: "#F1EDE4", color: "#8a8172" } }, "\uD83C\uDD93 Free"))),
+            React.createElement("div", { className: "mt-auto pb-5 pt-6 flex gap-3" },
+                React.createElement("button", { onClick: () => { sfx(SFX.click); setScreen(progress.name ? "course" : "login"); }, className: "pop flex-1 py-3 rounded-2xl text-white text-sm font-bold border-b-4 flex flex-col items-center gap-1", style: bigBtn(C.green) },
+                    React.createElement("span", { className: "text-xl" }, "\uD83C\uDFAE"),
+                    "Game"),
+                React.createElement("button", { onClick: () => { sfx(SFX.click); setScreen("leaderboard"); loadBoard(); }, className: "pop flex-1 py-3 rounded-2xl text-sm font-bold border-b-4 flex flex-col items-center gap-1", style: Object.assign(Object.assign({}, bigBtn(C.gold)), { color: C.ink }) },
+                    React.createElement("span", { className: "text-xl" }, "\uD83C\uDFC6"),
+                    "Leaderboard"),
+                React.createElement("button", { onClick: () => { sfx(SFX.click); setScreen("account"); setNameDraft(progress.name || ""); }, className: "pop flex-1 py-3 rounded-2xl text-white text-sm font-bold border-b-4 flex flex-col items-center gap-1", style: bigBtn(C.red) },
+                    React.createElement("span", { className: "text-xl" }, "\uD83D\uDC64"),
+                    "Account")))),
+        screen === "course" && (React.createElement("div", { className: "max-w-md mx-auto px-4 pb-20 fadeup" },
+            React.createElement("header", { className: "flex items-center justify-between pt-4" },
+                React.createElement("button", { onClick: () => { sfx(SFX.click); setScreen("menu"); }, className: "pop flex items-center gap-2 font-bold text-sm opacity-70" }, "\u2190 Menu"),
+                React.createElement("div", { className: "flex gap-2" },
+                    React.createElement(Pill, { style: { background: "#FFF3D6", color: "#9a6b00" } },
+                        "\uD83D\uDD25 ",
+                        progress.streak),
+                    React.createElement(Pill, { style: { background: "#E8F5EE", color: C.green } },
+                        "\u26A1 ",
+                        progress.xp))),
+            React.createElement("div", { className: "mt-4 rounded-3xl p-5 text-white relative overflow-hidden", style: { background: "linear-gradient(135deg, " + C.green + ", #0a8f57)" } },
+                React.createElement("div", { className: "absolute -right-4 -bottom-6 opacity-25" },
+                    React.createElement(Bee, { size: 130 })),
+                React.createElement("div", { className: "text-xs font-bold tracking-widest opacity-90" }, "LEVEL"),
+                React.createElement("div", { style: font, className: "text-4xl font-bold" }, "A1 \u00B7 Anf\u00E4nger"),
+                React.createElement("p", { className: "mt-1 text-sm opacity-95" }, "Beginner German \u2014 Introduction \u00B7 Lektion 1\u20134 \u00B7 more soon")),
+            savedLesson && (() => {
+                const u = ALL_UNITS.find(x => x.id === savedLesson.unitId);
+                return u ? (React.createElement("div", { className: "mt-4 p-4 rounded-3xl border-2", style: { borderColor: C.gold, background: "#FFF7DF" } },
+                    React.createElement("div", { style: font, className: "font-bold" },
+                        "\u23F8\uFE0F Unfinished lesson: ",
+                        u.title),
+                    React.createElement("div", { className: "flex gap-3 mt-3" },
+                        React.createElement("button", { onClick: resumeLesson, className: "pop flex-1 py-3 rounded-2xl font-bold text-white border-b-4", style: Object.assign({ background: C.green, borderColor: "rgba(0,0,0,.25)" }, font) }, "RESUME"),
+                        React.createElement("button", { onClick: () => startLesson(u), className: "pop flex-1 py-3 rounded-2xl font-bold border-2", style: Object.assign({ borderColor: C.line, background: C.card }, font) }, "RESTART")))) : null;
+            })(),
+            (() => {
+                const nodes = [
+                    ...MODULES.map(m => ({ key: m.key, icon: m.icon, title: m.title, mod: m })),
+                    ...LEKTIONEN_SOON.map(n => ({ key: "soon" + n, icon: "🔒", title: "Lektion " + n, soon: true })),
+                ];
+                const H = 108;
+                const xs = [24, 68, 30, 70, 26, 66];
+                const pts = nodes.map((_, i) => ({ x: xs[i % xs.length], y: i * H + H / 2 }));
+                const path = pts.map((p, i) => i === 0 ? "M " + p.x + " " + p.y :
+                    "C " + pts[i - 1].x + " " + (pts[i - 1].y + H * 0.55) + ", " + p.x + " " + (p.y - H * 0.55) + ", " + p.x + " " + p.y).join(" ");
+                const firstActive = nodes.findIndex(n => n.mod && n.mod.units.filter(u => progress.done[u.id]).length < n.mod.units.length);
+                const TOT = nodes.length * H + 10;
+                const riverD = "M 88 0 C 60 " + (TOT * 0.14) + ", 10 " + (TOT * 0.24) + ", 13 " + (TOT * 0.40) +
+                    " C 16 " + (TOT * 0.56) + ", 90 " + (TOT * 0.60) + ", 85 " + (TOT * 0.78) +
+                    " C 80 " + (TOT * 0.93) + ", 30 " + (TOT * 0.96) + ", 18 " + TOT;
+                const deco = [
+                    { t: "tree", x: 8, y: H * 0.45, s: 44 }, { t: "tree", x: 90, y: H * 1.2, s: 34 },
+                    { t: "tree", x: 7, y: H * 2.35, s: 40 }, { t: "tree", x: 91, y: H * 3.25, s: 46 },
+                    { t: "tree", x: 6, y: H * 4.45, s: 36 }, { t: "tree", x: 90, y: H * 5.35, s: 42 },
+                    { t: "fl", e: "🌸", x: 17, y: H * 0.95 }, { t: "fl", e: "🌼", x: 84, y: H * 1.85 },
+                    { t: "fl", e: "🌻", x: 12, y: H * 3.05 }, { t: "fl", e: "🌸", x: 88, y: H * 4.05 },
+                    { t: "fl", e: "🌼", x: 16, y: H * 5.05 }, { t: "fl", e: "🍄", x: 82, y: H * 5.65 },
+                    { t: "bee", x: 88, y: H * 0.35, s: 30 }, { t: "bee", x: 11, y: H * 3.65, s: 26 }, { t: "bee", x: 85, y: H * 4.75, s: 28 },
+                ];
+                return (React.createElement("div", { className: "relative mt-4", style: { height: TOT } },
+                    React.createElement("div", { className: "absolute inset-0 pointer-events-none overflow-hidden rounded-3xl" },
+                        React.createElement("div", { className: "absolute", style: { left: "-20%", right: "-20%", top: H * 1.4, height: 150, background: "#DFEFD8", borderRadius: "50%", opacity: .65 } }),
+                        React.createElement("div", { className: "absolute", style: { left: "-25%", right: "-25%", top: H * 3.5, height: 170, background: "#D4EACB", borderRadius: "50%", opacity: .65 } }),
+                        React.createElement("div", { className: "absolute", style: { left: "-20%", right: "-20%", bottom: -50, height: 160, background: "#CBE5C2", borderRadius: "50%", opacity: .75 } }),
+                        React.createElement("svg", { className: "absolute inset-0 w-full h-full", viewBox: "0 0 100 " + TOT, preserveAspectRatio: "none" },
+                            React.createElement("path", { d: riverD, fill: "none", stroke: "#B7DFF0", strokeWidth: "22", strokeLinecap: "round", vectorEffect: "non-scaling-stroke", opacity: ".85" }),
+                            React.createElement("path", { d: riverD, fill: "none", stroke: "#E2F4FC", strokeWidth: "8", strokeLinecap: "round", vectorEffect: "non-scaling-stroke", strokeDasharray: "12 26", opacity: ".9", className: "river-flow" })),
+                        React.createElement("svg", { className: "absolute", style: { right: 6, top: 4 }, width: "44", height: "44", viewBox: "0 0 40 40" },
+                            React.createElement("circle", { cx: "20", cy: "20", r: "9", fill: C.gold }),
+                            React.createElement("g", { stroke: C.gold, strokeWidth: "3", strokeLinecap: "round" }, [0, 1, 2, 3, 4, 5, 6, 7].map(i => {
+                                const a = i * Math.PI / 4;
+                                return React.createElement("line", { key: i, x1: 20 + 12.5 * Math.cos(a), y1: 20 + 12.5 * Math.sin(a), x2: 20 + 17 * Math.cos(a), y2: 20 + 17 * Math.sin(a) });
+                            }))),
+                        deco.map((d, i) => (React.createElement("div", { key: i, className: "absolute", style: { left: d.x + "%", top: d.y, transform: "translate(-50%,-50%)" } },
+                            React.createElement("div", { className: d.t === "bee" ? "fly" : "sway", style: { animationDelay: (i * 0.6) + "s", animationDuration: d.t === "bee" ? (4.5 + (i % 3)) + "s" : (4 + (i % 4) * 0.7) + "s" } }, d.t === "tree" ? React.createElement(Tree, { size: d.s }) : d.t === "bee" ? React.createElement(Bee, { size: d.s, v: av }) : React.createElement("span", { style: { fontSize: 20, display: "inline-block" } }, d.e)))))),
+                    React.createElement("svg", { className: "absolute inset-0 w-full h-full", viewBox: "0 0 100 " + TOT, preserveAspectRatio: "none" },
+                        React.createElement("path", { d: path, fill: "none", stroke: "#C9B583", strokeWidth: "4", strokeDasharray: "0.1 9", strokeLinecap: "round", vectorEffect: "non-scaling-stroke" })),
+                    nodes.map((n, i) => {
+                        const done = n.mod ? n.mod.units.filter(u => progress.done[u.id]).length : 0;
+                        const total = n.mod ? n.mod.units.length : 0;
+                        const complete = n.mod && total > 0 && done === total;
+                        const isActive = i === firstActive;
+                        return (React.createElement("button", { key: n.key, disabled: !!n.soon, onClick: () => { if (n.mod) {
+                                sfx(SFX.click);
+                                setMod(n.mod);
+                                setScreen("module");
+                            } }, className: "pop absolute flex flex-col items-center", style: { left: pts[i].x + "%", top: pts[i].y, transform: "translate(-50%,-50%)", opacity: n.soon ? .65 : 1 } },
+                            React.createElement("div", { className: "relative w-20 h-20 rounded-full flex items-center justify-center text-3xl border-b-8", style: { background: n.soon ? "#C9C2B4" : complete ? C.green : C.gold,
+                                    borderColor: "rgba(0,0,0,.22)", boxShadow: "0 5px 0 rgba(0,0,0,.08)" } },
+                                complete ? "⭐" : n.icon,
+                                isActive && React.createElement("div", { className: "absolute -top-10 -right-9 bee-bob" },
+                                    React.createElement(Bee, { size: 52, v: av }))),
+                            React.createElement("div", { className: "mt-1.5 font-bold text-sm px-2 py-0.5 rounded-full", style: Object.assign(Object.assign({}, font), { background: "rgba(255,251,243,.9)" }) }, n.title),
+                            React.createElement("div", { className: "text-xs font-bold", style: { color: n.soon ? "#8a8172" : C.green } }, n.soon ? "soon 📝" : done + "/" + total)));
+                    })));
+            })())),
+        screen === "module" && mod && (React.createElement("div", { className: "max-w-md mx-auto px-4 pb-24 fadeup" },
+            React.createElement("header", { className: "flex items-center justify-between pt-4" },
+                React.createElement("button", { onClick: () => { sfx(SFX.click); setScreen("course"); }, className: "pop font-bold text-sm opacity-70" }, "\u2190 Roadmap"),
+                React.createElement("div", { className: "flex gap-2" },
+                    React.createElement(Pill, { style: { background: "#FFF3D6", color: "#9a6b00" } },
+                        "\uD83D\uDD25 ",
+                        progress.streak),
+                    React.createElement(Pill, { style: { background: "#E8F5EE", color: C.green } },
+                        "\u26A1 ",
+                        progress.xp))),
+            (() => {
+                const unlockedN = unlockedIdx(mod.units);
+                const doneN = mod.units.filter(u => progress.done[u.id]).length;
+                const pct = Math.round((doneN / mod.units.length) * 100);
+                const activeU = mod.units.find((u, i) => i < unlockedN && !progress.done[u.id]);
+                const chunk = (arr) => { const rows = []; let i = 0, s = 3; while (i < arr.length) {
+                    rows.push(arr.slice(i, i + s));
+                    i += s;
+                    s = s === 3 ? 2 : 3;
+                } return rows; };
+                return (React.createElement(React.Fragment, null,
+                    React.createElement("div", { className: "mt-4 rounded-3xl p-5 relative overflow-hidden", style: { background: "linear-gradient(135deg, #FFE477, #FFC93C)" } },
+                        React.createElement("div", { className: "absolute -right-5 -bottom-7 opacity-25 pointer-events-none" },
+                            React.createElement(Bee, { size: 120 })),
+                        React.createElement("div", { className: "absolute right-4 top-3 pointer-events-none fly" },
+                            React.createElement(Bee, { size: 34, v: av })),
+                        React.createElement("div", { className: "flex items-center gap-3" },
+                            React.createElement("div", { className: "hex flex items-center justify-center text-3xl shrink-0", style: { width: 64, height: 70, background: "#FFFDF6" } }, mod.icon),
+                            React.createElement("div", { className: "flex-1 min-w-0" },
+                                React.createElement("div", { className: "text-xs font-bold tracking-widest", style: { color: "#8a5a00" } }, "DER BIENENSTOCK \u00B7 THE HIVE"),
+                                React.createElement("div", { style: font, className: "text-2xl font-bold leading-tight" }, mod.title))),
+                        React.createElement("div", { className: "mt-4 h-6 rounded-full relative overflow-hidden border-2", style: { background: "rgba(255,255,255,.65)", borderColor: "rgba(0,0,0,.12)" } },
+                            React.createElement("div", { className: "h-full rounded-full transition-all duration-700", style: { width: Math.max(pct, 5) + "%", background: "linear-gradient(90deg, #F6A800, #C97B00)" } }),
+                            React.createElement("div", { className: "absolute inset-0 flex items-center justify-center text-xs font-bold", style: { color: "#5d3f00" } },
+                                doneN,
+                                "/",
+                                mod.units.length,
+                                " cells full of honey \uD83C\uDF6F"))),
+                    savedLesson && (() => {
+                        const u = ALL_UNITS.find(x => x.id === savedLesson.unitId);
+                        return u ? (React.createElement("div", { className: "mt-4 p-4 rounded-3xl border-2", style: { borderColor: C.gold, background: "#FFF7DF" } },
+                            React.createElement("div", { style: font, className: "font-bold" },
+                                "\u23F8\uFE0F Unfinished lesson: ",
+                                u.title),
+                            React.createElement("div", { className: "flex gap-3 mt-3" },
+                                React.createElement("button", { onClick: resumeLesson, className: "pop flex-1 py-3 rounded-2xl font-bold text-white border-b-4", style: Object.assign({ background: C.green, borderColor: "rgba(0,0,0,.25)" }, font) }, "RESUME"),
+                                React.createElement("button", { onClick: () => startLesson(u), className: "pop flex-1 py-3 rounded-2xl font-bold border-2", style: Object.assign({ borderColor: C.line, background: C.card }, font) }, "RESTART")))) : null;
+                    })(),
+                    mod.sections.map((sec) => (React.createElement("div", { key: sec.name, className: "mt-7" },
+                        React.createElement("div", { className: "flex items-center justify-center gap-2 mb-4" },
+                            React.createElement("span", { className: "sway", style: { display: "inline-block" } }, "\uD83C\uDF3C"),
+                            React.createElement("h2", { style: Object.assign(Object.assign({}, font), { background: "#FFF7DF", borderColor: C.line }), className: "font-bold text-sm text-center px-4 py-1.5 rounded-full border-2" }, sec.name),
+                            React.createElement("span", { className: "sway", style: { display: "inline-block", animationDelay: "1.2s" } }, "\uD83C\uDF3C")),
+                        chunk(sec.ids).map((row, ri) => (React.createElement("div", { key: ri, className: "flex justify-center gap-2", style: { marginTop: ri === 0 ? 0 : -14 } }, row.map((id) => {
+                            const u = mod.units.find(x => x.id === id);
+                            const idx = mod.units.indexOf(u);
+                            const unlocked = idx < unlockedN;
+                            const stars = progress.done[u.id] || 0;
+                            const complete = stars > 0;
+                            const isActive = activeU && activeU.id === id;
+                            const needsPay = unlocked && !canPlay(u);
+                            return (React.createElement("button", { key: id, disabled: !unlocked, onClick: () => startLesson(u), className: "pop relative shrink-0" + (isActive ? " hexpulse" : ""), style: { width: 112, height: 122 }, "aria-label": u.title },
+                                isActive && (React.createElement("div", { className: "absolute -top-8 left-1/2 z-10 pointer-events-none", style: { transform: "translateX(-50%)" } },
+                                    React.createElement("div", { className: "bee-bob" },
+                                        React.createElement(Bee, { size: 46, v: av })))),
+                                React.createElement("div", { className: "hex w-full h-full flex items-center justify-center", style: { background: !unlocked ? "#BFB8A4" : complete ? C.green : "#C9821B", padding: 4 } },
+                                    React.createElement("div", { className: "hex w-full h-full flex flex-col items-center justify-center px-3 text-center", style: { background: !unlocked ? "#EDE8D9" : complete ? "#F1FAEF" : "linear-gradient(160deg, #FFE9A8, #FFCB4D)" } },
+                                        React.createElement("div", { className: "text-2xl leading-none" }, !unlocked ? "🔒" : needsPay ? "👑" : (complete && stars === 3 ? "🍯" : u.icon)),
+                                        React.createElement("div", { className: "mt-1 font-bold", style: Object.assign(Object.assign({}, font), { fontSize: 10, lineHeight: 1.15, color: unlocked ? C.ink : "#9a917d" }) }, u.title),
+                                        React.createElement("div", { style: { fontSize: 11, marginTop: 2, color: "#B45309" } },
+                                            "★".repeat(stars),
+                                            React.createElement("span", { style: { color: "rgba(0,0,0,.16)" } }, "★".repeat(3 - stars)))))));
+                        }))))))),
+                    doneN === mod.units.length ? (React.createElement("button", { onClick: () => startBlitz(mod), className: "pop hexpulse w-full mt-8 py-4 rounded-2xl font-bold text-lg border-b-4", style: Object.assign({ background: C.gold, color: C.ink, borderColor: "rgba(0,0,0,.25)" }, font) },
+                        "\u26A1 BLITZRUNDE: ",
+                        mod.title,
+                        "! \u26A1")) : (React.createElement("div", { className: "text-center text-xs font-bold mt-7 opacity-60" },
+                        "Fill every cell with honey to unlock the ",
+                        mod.title,
+                        " Blitzrunde! \uD83D\uDC1D\u26A1"))));
+            })())),
+        screen === "lesson" && q && (React.createElement("div", { className: "max-w-md mx-auto px-4 pt-4 pb-44 fadeup" },
+            React.createElement("div", { className: "flex items-center gap-3" },
+                React.createElement("button", { onClick: () => { sfx(SFX.click); setScreen(mod ? "module" : "course"); }, className: "pop text-2xl opacity-60 px-1", "aria-label": "Quit lesson" }, "\u2715"),
+                React.createElement("div", { className: "flex-1 h-4 rounded-full relative", style: { background: C.line } },
+                    React.createElement("div", { className: "h-full rounded-full transition-all duration-500", style: { width: ((qi / qs.length) * 100) + "%", background: C.green } }),
+                    React.createElement("div", { className: "absolute transition-all duration-500", style: { left: "calc(" + ((qi / qs.length) * 100) + "% - 14px)", top: "-14px", pointerEvents: "none" } },
+                        React.createElement(Bee, { size: 30, v: av })))),
+            React.createElement("div", { className: "mt-6" },
+                React.createElement("div", { style: font, className: "text-xl font-bold leading-snug" }, q.kind === "match" ? "Match the pairs" : q.prompt),
+                q.sub ? React.createElement("div", { className: "mt-2 text-2xl leading-snug", style: font }, q.sub) : null,
+                q.kind === "mc" && (React.createElement("div", { className: "mt-5 space-y-3" }, q.options.map(opt => (React.createElement("button", { key: opt, onClick: () => { if (!feedback) {
+                        sfx(SFX.click);
+                        setSel(opt);
+                    } }, className: "pop w-full p-4 rounded-2xl border-2 text-left font-bold min-h-14 text-base", style: {
+                        background: feedback ? (opt === q.correct ? "#E8F5EE" : opt === sel ? "#FDEBEE" : C.card) : (sel === opt ? "#FFF7DF" : C.card),
+                        borderColor: feedback ? (opt === q.correct ? C.green : opt === sel ? C.red : C.line) : (sel === opt ? C.gold : C.line),
+                    } }, opt))))),
+                q.kind === "type" && (React.createElement("div", { className: "mt-5" },
+                    React.createElement("input", { value: typed, onChange: e => setTyped(e.target.value), disabled: !!feedback, inputMode: q.numeric ? "numeric" : "text", autoCapitalize: "none", autoCorrect: "off", placeholder: q.numeric ? "e.g. 47" : "Type in German…", className: "w-full p-4 rounded-2xl border-2 font-bold text-lg outline-none", style: { borderColor: C.line, background: C.card } }),
+                    q.umlauts && !feedback && (React.createElement("div", { className: "flex gap-2 mt-3" }, ["ä", "ö", "ü", "ß"].map(ch => (React.createElement("button", { key: ch, onClick: () => { sfx(SFX.click); setTyped(t => t + ch); }, className: "pop flex-1 py-3 rounded-xl border-2 font-bold text-lg", style: { borderColor: C.line, background: C.card } }, ch))))))),
+                q.kind === "match" && matchTiles && (React.createElement("div", { className: "mt-5 grid grid-cols-2 gap-3" }, ["left", "right"].map(side => (React.createElement("div", { key: side, className: "space-y-3" }, matchTiles[side].map(v => (React.createElement("button", { key: v, onClick: () => tapMatch(side, v), className: "pop w-full p-3 rounded-2xl border-2 font-bold text-sm min-h-14", style: {
+                        background: matchDone[v] ? "#E8F5EE" : matchWrong && matchWrong.includes(v) ? "#FDEBEE" : matchSel && matchSel.val === v ? "#FFF7DF" : C.card,
+                        borderColor: matchDone[v] ? C.green : matchWrong && matchWrong.includes(v) ? C.red : matchSel && matchSel.val === v ? C.gold : C.line,
+                        opacity: matchDone[v] ? .55 : 1,
+                    } }, v))))))))),
+            React.createElement("div", { className: "fixed bottom-0 left-0 right-0 z-30", style: { background: "linear-gradient(transparent, " + C.bg + " 30%)" } },
+                React.createElement("div", { className: "max-w-md mx-auto px-4 pb-5 pt-6" },
+                    !feedback && q.kind !== "match" && (React.createElement("button", { onClick: check, disabled: q.kind === "mc" ? !sel : !typed.trim(), className: "pop w-full py-4 rounded-2xl font-bold text-white text-lg border-b-4", style: Object.assign({ background: (q.kind === "mc" ? sel : typed.trim()) ? C.green : "#C9C2B4", borderColor: "rgba(0,0,0,.25)" }, font) }, "CHECK")),
+                    feedback && (React.createElement("div", { className: "rounded-2xl p-4 border-2", style: { background: feedback.ok ? "#E8F5EE" : "#FDEBEE", borderColor: feedback.ok ? C.green : C.red } },
+                        React.createElement("div", { style: font, className: "font-bold text-lg" }, feedback.ok ? PRAISE[Math.floor(Math.random() * PRAISE.length)] : OOPS[Math.floor(Math.random() * OOPS.length)]),
+                        !feedback.ok && React.createElement("div", { className: "text-sm mt-1" },
+                            "Correct answer: ",
+                            React.createElement("b", null, feedback.correct)),
+                        !feedback.ok && feedback.explain && React.createElement("div", { className: "text-sm mt-2 p-2.5 rounded-xl", style: { background: "rgba(255,255,255,.7)" } },
+                            "\uD83D\uDCA1 ",
+                            feedback.explain),
+                        React.createElement("button", { onClick: next, className: "pop mt-3 w-full py-3.5 rounded-2xl font-bold text-white border-b-4", style: Object.assign({ background: feedback.ok ? C.green : C.red, borderColor: "rgba(0,0,0,.25)" }, font) }, "CONTINUE"))))))),
+        screen === "done" && (React.createElement("div", { className: "max-w-md mx-auto px-4 pt-14 text-center fadeup" },
+            React.createElement("div", { className: "flex justify-center" },
+                React.createElement(Bee, { size: 130, bob: true, v: av })),
+            React.createElement("h1", { style: font, className: "text-3xl font-bold mt-4" }, "Geschafft! Sehr gut! \uD83C\uDF89"),
+            React.createElement("p", { className: "mt-2 opacity-80" },
+                "You finished ",
+                React.createElement("b", null, unit.title)),
+            React.createElement("div", { className: "flex justify-center gap-3 mt-5 flex-wrap" },
+                React.createElement(Pill, { style: { background: "#E8F5EE", color: C.green } },
+                    "+",
+                    earned,
+                    " XP \u26A1"),
+                React.createElement(Pill, { style: { background: "#FFF3D6", color: "#9a6b00" } },
+                    "\uD83D\uDD25 Streak: ",
+                    progress.streak)),
+            unit.id !== "review" ? (React.createElement("div", { className: "text-4xl mt-4", style: { color: C.gold } },
+                "★".repeat(progress.done[unit.id] || 1),
+                React.createElement("span", { style: { color: "#DDD5C4" } }, "★".repeat(3 - (progress.done[unit.id] || 1))))) : (React.createElement("div", { className: "mt-4 text-sm font-bold", style: { color: C.green } },
+                "\uD83D\uDD01 Mistakes fixed \u2014 ",
+                (progress.review || []).length,
+                " left in the hive!")),
+            React.createElement("button", { onClick: () => { sfx(SFX.click); setScreen(mod ? "module" : "course"); }, className: "pop mt-8 px-10 py-4 rounded-2xl font-bold text-white text-lg border-b-4", style: Object.assign({ background: C.green, borderColor: "rgba(0,0,0,.25)" }, font) }, "CONTINUE"),
+            (progress.review || []).length > 0 && (React.createElement("button", { onClick: startReview, className: "pop w-full mt-4 py-3 rounded-2xl font-bold border-b-4 text-white", style: Object.assign({ background: C.red, borderColor: "rgba(0,0,0,.25)" }, font) },
+                "\uD83D\uDD01 Fehler-Review (",
+                (progress.review || []).length,
+                ")")))),
+        screen === "blitz" && (React.createElement("div", { className: "max-w-md mx-auto px-4 pt-4 pb-16 fadeup" }, blitzT > 0 && blitzQs[blitzI] ? (React.createElement(React.Fragment, null,
+            React.createElement("div", { className: "flex items-center gap-2" },
+                React.createElement("button", { onClick: () => { sfx(SFX.click); setBlitzT(0); }, className: "pop text-2xl opacity-60 px-1", "aria-label": "End round" }, "\u2715"),
+                React.createElement("div", { className: "flex-1 h-4 rounded-full overflow-hidden", style: { background: C.line } },
+                    React.createElement("div", { className: "h-full rounded-full", style: { width: (blitzT / 60 * 100) + "%", background: blitzT <= 10 ? C.red : C.gold, transition: "width 1s linear" } })),
+                React.createElement(Pill, { style: { background: blitzT <= 10 ? "#FDEBEE" : "#FFF3D6", color: blitzT <= 10 ? C.red : "#9a6b00" } },
+                    "\u23F1 ",
+                    blitzT,
+                    "s"),
+                React.createElement(Pill, { style: { background: "#E8F5EE", color: C.green } },
+                    "\u26A1 ",
+                    blitzScore)),
+            React.createElement("div", { className: "mt-8 text-center" },
+                React.createElement("div", { className: "text-xs font-bold tracking-widest opacity-60" }, blitzQs[blitzI].label),
+                React.createElement("div", { style: font, className: "text-3xl font-bold mt-2 leading-snug" },
+                    "\u201E",
+                    blitzQs[blitzI].prompt,
+                    "\u201C")),
+            React.createElement("div", { className: "mt-6 space-y-3" }, blitzQs[blitzI].options.map(opt => (React.createElement("button", { key: opt, onClick: () => tapBlitz(opt), className: "pop w-full p-4 rounded-2xl border-2 text-left font-bold min-h-14", style: {
+                    background: blitzSel ? (opt === blitzQs[blitzI].correct ? "#E8F5EE" : opt === blitzSel ? "#FDEBEE" : C.card) : C.card,
+                    borderColor: blitzSel ? (opt === blitzQs[blitzI].correct ? C.green : opt === blitzSel ? C.red : C.line) : C.line,
+                } }, opt)))))) : (React.createElement("div", { className: "text-center pt-10" },
+            React.createElement("div", { className: "flex justify-center" },
+                React.createElement(Bee, { size: 120, bob: true, v: av })),
+            React.createElement("h1", { style: font, className: "text-3xl font-bold mt-4" }, "\u26A1 Blitz beendet!"),
+            React.createElement("p", { className: "mt-2 opacity-80" },
+                "You got ",
+                React.createElement("b", null, blitzScore),
+                " right in 60 seconds!"),
+            React.createElement("div", { className: "flex justify-center gap-3 mt-4" },
+                React.createElement(Pill, { style: { background: "#E8F5EE", color: C.green } },
+                    "+",
+                    blitzScore * 5,
+                    " XP \u26A1"),
+                React.createElement(Pill, { style: { background: "#FFF3D6", color: "#9a6b00" } },
+                    "\uD83D\uDD25 ",
+                    progress.streak)),
+            React.createElement("div", { className: "flex gap-3 mt-8" },
+                React.createElement("button", { onClick: () => startBlitz(blitzFrom), className: "pop flex-1 py-4 rounded-2xl font-bold border-b-4", style: Object.assign({ background: C.gold, color: C.ink, borderColor: "rgba(0,0,0,.25)" }, font) }, "PLAY AGAIN"),
+                React.createElement("button", { onClick: () => { sfx(SFX.click); setScreen(blitzFrom ? "module" : "course"); }, className: "pop flex-1 py-4 rounded-2xl font-bold text-white border-b-4", style: Object.assign({ background: C.green, borderColor: "rgba(0,0,0,.25)" }, font) }, "DONE")),
+            (progress.review || []).length > 0 && (React.createElement("button", { onClick: startReview, className: "pop w-full mt-3 py-3 rounded-2xl font-bold text-white border-b-4", style: Object.assign({ background: C.red, borderColor: "rgba(0,0,0,.25)" }, font) },
+                "\uD83D\uDD01 Fehler-Review (",
+                (progress.review || []).length,
+                ")")))))),
+        screen === "leaderboard" && (React.createElement("div", { className: "max-w-md mx-auto px-4 pt-4 pb-16 fadeup" },
+            React.createElement("button", { onClick: () => { sfx(SFX.click); setScreen("menu"); }, className: "pop font-bold text-sm opacity-70" }, "\u2190 Menu"),
+            React.createElement("div", { className: "flex items-center gap-3 mt-3" },
+                React.createElement("div", { className: "text-4xl" }, "\uD83C\uDFC6"),
+                React.createElement("h1", { style: font, className: "text-2xl font-bold" }, "Leaderboard")),
+            !progress.name && (React.createElement("div", { className: "mt-4 p-4 rounded-2xl border-2 text-sm", style: { borderColor: C.gold, background: "#FFF7DF" } },
+                "Set your name in ",
+                React.createElement("b", null, "Account"),
+                " to join the leaderboard! \uD83D\uDC1D")),
+            React.createElement("div", { className: "mt-5 space-y-2.5" },
+                board === null && React.createElement("div", { className: "text-center py-10 opacity-60" }, "Loading\u2026 \uD83D\uDC1D"),
+                board === "err" && React.createElement("div", { className: "text-center py-10 opacity-60" }, "Couldn't load the leaderboard right now \u2014 your XP is safe, try again later!"),
+                Array.isArray(board) && board.length === 0 && React.createElement("div", { className: "text-center py-10 opacity-60" }, "No players yet \u2014 be the first! \uD83E\uDD47"),
+                Array.isArray(board) && board.map((r, i) => (React.createElement("div", { key: i, className: "flex items-center gap-3 p-3.5 rounded-2xl border-2", style: { borderColor: r.name === progress.name ? C.green : C.line, background: r.name === progress.name ? "#E8F5EE" : C.card } },
+                    React.createElement("div", { style: font, className: "w-9 text-center text-lg font-bold" }, i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : i + 1),
+                    React.createElement(Bee, { v: r.avatar || 0, size: 36 }),
+                    React.createElement("div", { className: "flex-1 font-bold truncate" }, r.name),
+                    React.createElement(Pill, { style: { background: "#FDEBEE", color: C.red } },
+                        "\u2605",
+                        r.stars || 0),
+                    React.createElement(Pill, { style: { background: "#FFF3D6", color: "#9a6b00" } },
+                        "\uD83D\uDD25",
+                        r.streak || 0),
+                    React.createElement(Pill, { style: { background: "#E8F5EE", color: C.green } },
+                        "\u26A1",
+                        r.xp))))))),
+        screen === "account" && (React.createElement("div", { className: "max-w-md mx-auto px-4 pt-4 pb-16 fadeup" },
+            React.createElement("button", { onClick: () => { sfx(SFX.click); setScreen("menu"); }, className: "pop font-bold text-sm opacity-70" }, "\u2190 Menu"),
+            React.createElement("div", { className: "flex flex-col items-center mt-4" },
+                React.createElement(Bee, { size: 100, v: progress.avatar }),
+                React.createElement("h1", { style: font, className: "text-2xl font-bold mt-2" }, progress.name || "Anonymous Bee"),
+                React.createElement("div", { className: "text-sm font-bold", style: { color: C.green } }, beeName(progress.avatar))),
+            React.createElement("div", { className: "mt-6" },
+                React.createElement("label", { className: "text-sm font-bold opacity-80" }, "Choose your bee avatar \uD83D\uDC1D"),
+                React.createElement("div", { className: "mt-2 grid grid-cols-5 gap-2 p-2 rounded-2xl border-2 overflow-y-auto", style: { borderColor: C.line, background: C.card, maxHeight: 260 } }, Array.from({ length: 50 }).map((_, i) => (React.createElement("button", { key: i, onClick: () => { sfx(SFX.click); save({ avatar: i }); }, className: "pop rounded-2xl p-1 flex items-center justify-center", style: { border: progress.avatar === i ? "3px solid " + C.green : "2px solid " + C.line,
+                        background: progress.avatar === i ? "#E8F5EE" : "#FFFDF8" } },
+                    React.createElement(Bee, { v: i, size: 44 })))))),
+            React.createElement("div", { className: "grid grid-cols-3 gap-3 mt-6 text-center" }, [["⚡ XP", progress.xp], ["🔥 Streak", progress.streak], ["★ Stars", totalStars]].map(([l, v]) => (React.createElement("div", { key: l, className: "rounded-2xl border-2 p-3", style: { borderColor: C.line, background: C.card } },
+                React.createElement("div", { style: font, className: "text-2xl font-bold" }, v),
+                React.createElement("div", { className: "text-xs opacity-70 mt-1" }, l))))),
+            React.createElement("div", { className: "mt-6 p-4 rounded-3xl border-2", style: { borderColor: isPremium ? C.green : C.gold, background: isPremium ? "#F1FAEF" : "#FFF7DF" } },
+                React.createElement("div", { style: font, className: "font-bold text-lg" }, isPremium ? "👑 Premium member"
+                    : inTrial ? "🎁 Free trial: " + trialDaysLeft() + " day" + (trialDaysLeft() === 1 ? "" : "s") + " left"
+                        : "🆓 Free plan"),
+                isPremium ? (React.createElement("p", { className: "text-sm mt-1 opacity-80" },
+                    "Full access until the end of ",
+                    fmtMk(progress.premiumUntil),
+                    " \uD83D\uDC1D\uD83C\uDF6F")) : (React.createElement(React.Fragment, null,
+                    React.createElement("div", { className: "flex gap-3 mt-3" },
+                        React.createElement("div", { className: "flex-1 p-3 rounded-2xl border-2 text-center", style: { borderColor: C.line, background: C.card } },
+                            React.createElement("div", { style: font, className: "font-bold text-lg" }, PRICE_M),
+                            React.createElement("div", { className: "text-xs opacity-70" }, "per month")),
+                        React.createElement("div", { className: "flex-1 p-3 rounded-2xl border-2 text-center", style: { borderColor: C.gold, background: C.card } },
+                            React.createElement("div", { style: font, className: "font-bold text-lg" }, PRICE_Y),
+                            React.createElement("div", { className: "text-xs opacity-70" }, "per year \uD83C\uDF6F"))),
+                    React.createElement("p", { className: "text-sm mt-3 text-center" },
+                        "M-Pesa \u2192 ",
+                        React.createElement("b", null, "Send Money"),
+                        " \u2192 ",
+                        React.createElement("b", null, MPESA_NUMBER),
+                        " (",
+                        MPESA_NAME,
+                        ")"),
+                    React.createElement("a", { href: "https://wa.me/254707679987?text=" + encodeURIComponent("Hi " + MPESA_NAME + "! 🐝 I've paid for Soma Deutsch Premium. My username is: " + (progress.name || "")), target: "_blank", rel: "noopener noreferrer", className: "pop mt-3 w-full py-3 rounded-2xl font-bold text-white border-b-4 flex items-center justify-center gap-2", style: Object.assign({ background: "#25D366", borderColor: "rgba(0,0,0,.25)", textDecoration: "none" }, font), onClick: () => sfx(SFX.click) }, "\uD83D\uDCAC Get your code on WhatsApp"),
+                    React.createElement("div", { className: "flex gap-2 mt-3" },
+                        React.createElement("input", { value: payCode, onChange: e => { setPayCode(e.target.value); setPayErr(""); }, placeholder: "Unlock code", autoCapitalize: "characters", autoCorrect: "off", className: "flex-1 min-w-0 p-3 rounded-2xl border-2 font-bold outline-none", style: { borderColor: C.line, background: C.card } }),
+                        React.createElement("button", { disabled: payBusy || !payCode.trim(), onClick: redeemCode, className: "pop px-4 py-3 rounded-2xl font-bold text-white border-b-4 shrink-0", style: Object.assign({ background: payCode.trim() && !payBusy ? C.green : "#C9C2B4", borderColor: "rgba(0,0,0,.25)" }, font) }, payBusy ? "…" : "UNLOCK")),
+                    payErr && React.createElement("div", { className: "mt-2 p-2.5 rounded-xl text-sm font-bold", style: { background: "#FDEBEE", color: C.red } }, payErr)))),
+            React.createElement("div", { className: "mt-6 flex items-center justify-between p-4 rounded-2xl border-2", style: { borderColor: C.line, background: C.card } },
+                React.createElement("div", null,
+                    React.createElement("div", { className: "text-xs opacity-60 font-bold" }, "USERNAME"),
+                    React.createElement("div", { className: "font-bold" }, progress.name || "—")),
+                React.createElement("button", { onClick: logout, className: "pop px-5 py-2 rounded-full font-bold text-white", style: { background: C.red } }, "LOG OUT")),
+            React.createElement("div", { className: "mt-6 flex items-center justify-between p-4 rounded-2xl border-2", style: { borderColor: C.line, background: C.card } },
+                React.createElement("div", { className: "font-bold" }, "Sound \uD83D\uDD0A"),
+                React.createElement("button", { onClick: () => { save({ sound: !progress.sound }); }, className: "pop px-5 py-2 rounded-full font-bold text-white", style: { background: progress.sound ? C.green : "#C9C2B4" } }, progress.sound ? "ON" : "OFF")),
+            React.createElement("button", { onClick: () => { if (window.confirm && !window.confirm("Reset all progress? This cannot be undone."))
+                    return; sfx(SFX.wrong); save({ xp: 0, streak: 0, lastDay: null, done: {} }); }, className: "pop mt-4 w-full py-3.5 rounded-2xl font-bold border-2", style: Object.assign({ borderColor: C.red, color: C.red, background: C.card }, font) }, "RESET PROGRESS"),
+            React.createElement("div", { className: "mt-8" }, !ownOn ? (!ownShow ? (React.createElement("button", { onClick: () => setOwnShow(true), className: "w-full text-center py-2", style: { opacity: .18 }, "aria-label": "Owner" }, "\uD83D\uDC1D")) : (React.createElement(React.Fragment, null,
+                React.createElement("div", { className: "flex gap-2 opacity-70" },
+                    React.createElement("input", { value: ownPin, onChange: e => { setOwnPin(e.target.value); setOwnErr(""); }, placeholder: "Owner PIN", type: "password", inputMode: "numeric", className: "flex-1 min-w-0 p-3 rounded-2xl border-2 font-bold outline-none text-sm", style: { borderColor: C.line, background: C.card } }),
+                    React.createElement("button", { onClick: ownUnlock, disabled: !ownPin.trim(), className: "pop px-4 rounded-2xl font-bold border-2 shrink-0 text-sm", style: Object.assign({ borderColor: C.line, background: C.card }, font) }, "\uD83D\uDC1D OWNER")),
+                ownErr && React.createElement("div", { className: "mt-2 text-sm font-bold text-center", style: { color: C.red } }, ownErr)))) : (React.createElement("div", { className: "p-4 rounded-3xl border-2", style: { borderColor: C.green, background: "#F1FAEF" } },
+                React.createElement("div", { style: font, className: "font-bold text-lg" }, "\uD83D\uDC51 Owner panel"),
+                React.createElement("p", { className: "text-sm opacity-70 mt-1" }, "Type a player's username to get their personal unlock codes."),
+                React.createElement("div", { className: "flex gap-2 mt-3" },
+                    React.createElement("input", { value: ownName, onChange: e => setOwnName(e.target.value), placeholder: "Player username", autoCapitalize: "none", autoCorrect: "off", className: "flex-1 min-w-0 p-3 rounded-2xl border-2 font-bold outline-none", style: { borderColor: C.line, background: C.card } }),
+                    React.createElement("button", { onClick: ownGen, disabled: !ownName.trim(), className: "pop px-4 rounded-2xl font-bold text-white border-b-4 shrink-0", style: Object.assign({ background: ownName.trim() ? C.green : "#C9C2B4", borderColor: "rgba(0,0,0,.25)" }, font) }, "GET CODE")),
+                ownCode && (React.createElement("div", { className: "mt-3 p-3 rounded-2xl", style: { background: C.card } },
+                    React.createElement("div", { className: "font-bold text-sm" },
+                        "\uD83D\uDC1D ",
+                        ownCode.u),
+                    React.createElement("div", { className: "mt-1 text-sm" },
+                        ownCode.m1,
+                        " \u00B7 monthly (",
+                        PRICE_M,
+                        "): ",
+                        React.createElement("b", { style: { color: C.green, fontSize: 17 } }, ownCode.c1)),
+                    React.createElement("div", { className: "text-sm" },
+                        ownCode.m1,
+                        " \u00B7 YEARLY (",
+                        PRICE_Y,
+                        "): ",
+                        React.createElement("b", { style: { color: C.red, fontSize: 17 } }, ownCode.cy)),
+                    React.createElement("div", { className: "text-sm" },
+                        ownCode.m2,
+                        " \u00B7 monthly: ",
+                        React.createElement("b", { style: { color: "#9a6b00" } }, ownCode.c2)))),
+                React.createElement("button", { onClick: () => { sfx(SFX.click); setOwnOn(false); setOwnCode(null); setOwnName(""); }, className: "pop mt-3 w-full py-2.5 rounded-2xl font-bold border-2 text-sm", style: Object.assign({ borderColor: C.line, background: C.card }, font) }, "CLOSE OWNER PANEL")))))),
+        upsell && (React.createElement("div", { className: "fixed inset-0 z-50 flex items-center justify-center px-6", style: { background: "rgba(31,26,20,.55)" }, onClick: () => { sfx(SFX.click); setUpsell(false); } },
+            React.createElement("div", { className: "w-full max-w-sm rounded-3xl p-5 text-center fadeup", style: { background: C.bg }, onClick: e => e.stopPropagation() },
+                React.createElement("div", { className: "flex justify-center" },
+                    React.createElement(Bee, { size: 84, bob: true, v: av })),
+                React.createElement("h2", { style: font, className: "text-2xl font-bold mt-2" }, "Upgrade to keep learning! \uD83D\uDC51"),
+                React.createElement("p", { className: "text-sm mt-2 opacity-80" }, "Unlock every Lektion and Blitzrunde!"),
+                React.createElement("div", { className: "flex gap-3 mt-4" },
+                    React.createElement("div", { className: "flex-1 p-3 rounded-2xl border-2", style: { borderColor: C.line, background: C.card } },
+                        React.createElement("div", { style: font, className: "font-bold text-lg" }, PRICE_M),
+                        React.createElement("div", { className: "text-xs opacity-70" }, "per month")),
+                    React.createElement("div", { className: "flex-1 p-3 rounded-2xl border-2", style: { borderColor: C.gold, background: "#FFF7DF" } },
+                        React.createElement("div", { style: font, className: "font-bold text-lg" }, PRICE_Y),
+                        React.createElement("div", { className: "text-xs opacity-70" }, "per year \uD83C\uDF6F"))),
+                React.createElement("button", { onClick: () => { sfx(SFX.click); setUpsell(false); setScreen("account"); }, className: "pop mt-4 w-full py-4 rounded-2xl font-bold text-white text-lg border-b-4", style: Object.assign({ background: C.green, borderColor: "rgba(0,0,0,.25)" }, font) }, "UPGRADE NOW \uD83D\uDC1D"),
+                React.createElement("button", { onClick: () => { sfx(SFX.click); setUpsell(false); }, className: "pop mt-3 w-full py-3 rounded-2xl font-bold border-2", style: Object.assign({ borderColor: C.line, background: C.card }, font) }, "Not now"))))));
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(SomaDeutsch));
+</script>
+</body>
+</html>
